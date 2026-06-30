@@ -1,0 +1,26 @@
+# ML-KEM Braid dependencies (pip mirror of pyproject.toml).
+# Preferred install path is `uv sync --extra dev`; this file is for plain-pip users.
+
+# Post-quantum ML-KEM (FIPS 203). Only library exposing the K-PKE internals the
+# Braid incremental Encaps1/Encaps2 split needs (liboqs/pycryptodome cannot).
+kyber-py>=0.0.4
+
+# X25519 / Ed25519 / HKDF-SHA256 / AES-256-GCM.
+cryptography>=42.0.0
+
+# AES DRBG (kyber-py deterministic vectors) + extra primitives.
+pycryptodome>=3.20.0
+
+# Real Reed-Solomon erasure coding.
+reedsolo>=1.7.0
+
+# FastAPI server + client.
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+httpx>=0.27.0
+pydantic>=2.6.0
+
+# Dev / test.
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+mypy>=1.8.0

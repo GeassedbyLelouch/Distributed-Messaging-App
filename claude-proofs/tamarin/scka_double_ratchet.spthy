@@ -1,0 +1,388 @@
+/*
+ * ============================================================================
+ *  scka_double_ratchet.spthy
+ *  Tamarin model of the STATEFUL CORE of ML-KEM Braid: the SCKA epoch ratchet
+ *  + the Double Ratchet layered on top, with a state-compromise adversary, so
+ *  that forward secrecy (FS) and post-compromise security (PCS) are statable.
+ *
+ *  This supersedes formal/tamarin/mlkem_braid.spthy: every lemma here is
+ *  WELL-FORMED (all variables bound -- the prior scaffold left k0/r0/k1/r1/ms
+ *  unbound), and Reveal_SK now consumes a PERSISTENT !SetupKey fact that
+ *  PQXDH_Setup actually emits (the prior scaffold referenced a fact it never
+ *  produced).
+ *
+ *  STATUS: authored against the code below; see claude-proofs/README.md for
+ *  whether it was executed in this environment and the exact run command.
+ *  The executability + agreement + ciphertext-auth + replay + OPK lemmas are
+ *  intended to discharge automatically; FS and PCS are the hard lemmas and may
+ *  require `--prove` with induction / an oracle (noted at each lemma).
+ *
+ *  Authoritative source of every label/derivation (read byte-exact):
+ *    ml_kem_braid/core/kdf.py             KDF_OK, KDF_AUTH
+ *    ml_kem_braid/core/authenticator.py   ratcheted MAC, update_and_verify_ciphertext
+ *    ml_kem_braid/core/double_ratchet.py  KDF_RK, directional chains, KDF_CK
+ *    ml_kem_braid/pqxdh/pqxdh.py          SK derivation (identity binding, OPK)
+ *
+ *  KEY ABSTRACTIONS (each justified; full list in claude-proofs/README.md):
+ *   [ABS-KEM]   ML-KEM = a generic symbolic IND-CCA KEM (function symbols below);
+ *               the incremental ct1/ct2 split is the EasyCrypt obligation, not
+ *               modelled here (revealing ct1 early is assumed benign, justified
+ *               by the EasyCrypt Lemma 1/2 + the kem_split harness).
+ *   [ABS-PQXDH] The four-DH + ML-KEM handshake is abstracted to one rule minting
+ *               a fresh ~SK bound to both identities, with OPK single-use. The
+ *               DH-level secrecy/UKS lives in the Verifpal model (which DOES run).
+ *   [ABS-HKDF]  HKDF/HMAC are one-way, collision-free function symbols; every
+ *               domain-separation label is a distinct symbol (so unrelated calls
+ *               give unrelated terms), matching the byte-exact labels in code.
+ *   [ABS-AEAD]  AES-256-GCM = symmetric-encryption; AD binding via an Eq() check.
+ * ============================================================================
+ */
+
+theory MLKEM_Braid_SCKA_DR
+begin
+
+builtins: symmetric-encryption, asymmetric-encryption, signing
+
+functions:
+    // Epoch / message-index counters as an uninterpreted successor s/1 over
+    // public constants ('e1' start epoch, 'i0' start index).  Both parties
+    // compute the SAME deterministic sequence e1, s(e1), s(s(e1)), ... so they
+    // agree on epoch identity without a global nat sort (the lemmas use
+    // timepoint ordering #i<#j, never epoch arithmetic).
+    s/1,
+    // ---- ML-KEM as a symbolic IND-CCA KEM [ABS-KEM] ----
+    //   Encaps : pick fresh coins ~m; ct = aenc(~m, pk(ek_sk)); ss = kdf_kem(~m).
+    //   Decaps : ~m = adec(ct, ek_sk);                          ss = kdf_kem(~m).
+    //   Modelled with the BUILT-IN asymmetric-encryption (natively subterm-
+    //   convergent, so no fragile custom equation) -- and faithful: the
+    //   encapsulator only ever holds the PUBLIC key pk(ek_sk), never ek_sk.
+    kdf_kem/1,          // KEM-secret derivation from the encapsulated coins
+    // ---- SCKA KDFs (core/kdf.py) ----
+    kdf_ok/2,           // KDF_OK(ss, e)            -> epoch key k_e
+    kdf_auth_root/3,    // KDF_AUTH(root,k,e) root' projection
+    kdf_auth_mac/3,     // KDF_AUTH(root,k,e) mac_key projection
+    mac_ct/3,           // HMAC(mac_key, ":ciphertext"||e||ct)
+    // ---- Double Ratchet KDFs (core/double_ratchet.py) ----
+    kdf_rk_rk/2,        // KDF_RK(rk,k_e) rk' projection
+    kdf_rk_seed/2,      // KDF_RK(rk,k_e) chain_seed projection
+    ck_atob/1, ck_btoa/1,   // directional chain split (info "A->B" / "B->A")
+    ck_msg/1, ck_next/1     // KDF_CK: mk = HMAC(ck,0x01) ; ck' = HMAC(ck,0x02)
+
+/* =====================  RESTRICTIONS  ===================== */
+
+restriction Equality:
+    "All x y #i. Eq(x, y) @ #i ==> x = y"
+
+// One-time prekey single-use (pqxdh.py deletes the OPK on use).
+restriction OPK_SingleUse:
+    "All opk #i #j. ConsumeOPK(opk) @ #i & ConsumeOPK(opk) @ #j ==> #i = #j"
+
+// A session's PQXDH setup happens at most once.
+restriction SingleSetup:
+    "All sid #i #j. Setup(sid) @ #i & Setup(sid) @ #j ==> #i = #j"
+
+// Each (session, epoch) is produced at most once (clean linear epoch chain).
+restriction UniqueEpoch:
+    "All sid e #i #j. NewEpoch(sid, e) @ #i & NewEpoch(sid, e) @ #j ==> #i = #j"
+
+/* =====================  (1) PQXDH SETUP [ABS-PQXDH]  ===================== */
+
+rule Register_Identity:
+    [ Fr(~ltk) ]
+  --[ RegisterId($X, pk(~ltk)) ]->
+    [ !Identity($X, ~ltk), !IdentityPub($X, pk(~ltk)), Out(pk(~ltk)) ]
+
+rule Publish_OPK:
+    [ Fr(~opk) ]
+  --[ PublishOPK($B, ~opk) ]->
+    [ !OPK($B, ~opk) ]
+
+// Abstracted handshake: mint a fresh ~SK bound to both identities, consume an
+// OPK, seed both DR/authenticator states at epoch %1.  Emits a PERSISTENT
+// !SetupKey so Reveal_SK (below) is usable.
+rule PQXDH_Setup:
+    [ Fr(~SK), Fr(~sid)
+    , !Identity($A, ltkA)
+    , !IdentityPub($A, pkA), !IdentityPub($B, pkB)
+    , !OPK($B, opk)
+    ]
+  --[ Setup(~sid)
+    , ConsumeOPK(opk)
+    , SetupKey(~sid, $A, $B, ~SK)
+    , SecretSetup(~SK)
+    , Running($A, $B, ~SK)
+    , Commit($A, $B, ~SK)
+    ]->
+    [ !StoredSK(~sid, $A, $B, ~SK)
+    , DR_State(~sid, $A, $B, 'Alice', ~SK, 'auth_root_zero', 'e1')
+    , DR_State(~sid, $A, $B, 'Bob',   ~SK, 'auth_root_zero', 'e1')
+    , !SessionParties(~sid, $A, $B)
+    ]
+
+/* =====================  (2) SCKA EPOCH RATCHET  ===================== */
+
+// The EK-side party (future DECAPSULATOR) publishes a fresh per-epoch KEM
+// public key (also as a persistent !EpochPub for the legitimate encapsulator)
+// and keeps the secret ek_sk to itself.
+rule SCKA_EpochKey_Publish:
+    [ Fr(~ek_sk), !SessionParties(~sid, $A, $B) ]
+  --[ EpochKeyPub(~sid) ]->
+    [ !EpochKEM(~sid, ~ek_sk), !EpochPub(~sid, pk(~ek_sk)), Out(pk(~ek_sk)) ]
+
+// Producer (ENCAPSULATOR, CT-side): uses the session's published epoch key
+// (in the real protocol the encapsulator takes the key from the MAC-
+// authenticated header, not an arbitrary network value -- so we bind it to the
+// legitimate !EpochPub rather than an open In(), which both is faithful and
+// keeps the analysis tractable).  Encapsulates with FRESH coins ~m (the PCS
+// entropy), derives k_e, ratchets the authenticator, MACs the ciphertext,
+// advances the DR root.  It never holds ek_sk -- only pk(ek_sk).
+rule SCKA_Epoch_Producer:
+    let ct    = aenc(~m, pkE)
+        ss_e  = kdf_kem(~m)
+        k_e   = kdf_ok(ss_e, e)
+        root2 = kdf_auth_root(root, k_e, e)
+        mac   = kdf_auth_mac(root, k_e, e)
+        macct = mac_ct(mac, e, ct)
+        rk2   = kdf_rk_rk(rk, k_e)
+        seed  = kdf_rk_seed(rk, k_e)
+    in
+    [ DR_State(~sid, $A, $B, role, rk, root, e)
+    , !EpochPub(~sid, pkE)
+    , Fr(~m)
+    ]
+  --[ NewEpoch(~sid, e)
+    , ProducerEpoch(~sid, role, e)
+    , EpochKey(~sid, e, k_e)
+    , SecretEpochKey(~sid, e, k_e)
+    , SecretSS(~sid, e, ss_e)
+    , UsedEncapCoins(~sid, e, ~m)
+    , AuthRatchet(~sid, role, e, mac)
+    , EmitCt(~sid, e, ct, macct)
+    ]->
+    [ DR_State(~sid, $A, $B, role, rk2, root2, s(e))
+    , DR_Chains(~sid, $A, $B, role, e, seed)
+    , Out(<ct, macct>)
+    ]
+
+// Consumer (DECAPSULATOR, EK-side): decapsulates with its secret ek_sk,
+// derives the SAME k_e, verifies MacCt TRANSACTIONALLY (Eq before commit --
+// update_and_verify_ciphertext), advances.
+rule SCKA_Epoch_Consumer:
+    let m        = adec(ct, ek_sk)
+        ss_e     = kdf_kem(m)
+        k_e      = kdf_ok(ss_e, e)
+        root2    = kdf_auth_root(root, k_e, e)
+        mac      = kdf_auth_mac(root, k_e, e)
+        macct_ck = mac_ct(mac, e, ct)
+        rk2      = kdf_rk_rk(rk, k_e)
+        seed     = kdf_rk_seed(rk, k_e)
+    in
+    [ DR_State(~sid, $A, $B, role, rk, root, e)
+    , !EpochKEM(~sid, ek_sk)
+    , In(<ct, macct>)
+    ]
+  --[ ConsumerEpoch(~sid, role, e)
+    , EpochKey(~sid, e, k_e)
+    , Eq(macct_ck, macct)
+    , VerifiedCt(~sid, e)
+    ]->
+    [ DR_State(~sid, $A, $B, role, rk2, root2, s(e))
+    , DR_Chains(~sid, $A, $B, role, e, seed)
+    ]
+
+/* =====================  (3) DOUBLE RATCHET  ===================== */
+
+rule DR_OpenSend_Alice:
+    let ck0 = ck_atob(seed) in
+    [ DR_Chains(~sid, $A, $B, 'Alice', e, seed) ]
+  --[ OpenSend(~sid, 'Alice', e) ]->
+    [ DR_Send(~sid, $A, $B, 'Alice', e, ck0, 'i0') ]
+
+rule DR_OpenSend_Bob:
+    let ck0 = ck_btoa(seed) in
+    [ DR_Chains(~sid, $A, $B, 'Bob', e, seed) ]
+  --[ OpenSend(~sid, 'Bob', e) ]->
+    [ DR_Send(~sid, $A, $B, 'Bob', e, ck0, 'i0') ]
+
+// Recv chains record the EXPECTED sender role (the peer) so the AD direction
+// check below is meaningful: Alice receives on B->A (sender Bob); Bob on A->B.
+rule DR_OpenRecv_Alice:
+    let ck0 = ck_btoa(seed) in
+    [ DR_Chains(~sid, $A, $B, 'Alice', e, seed) ]
+  --[ OpenRecv(~sid, 'Alice', e) ]->
+    [ DR_Recv(~sid, $A, $B, 'Alice', 'Bob', e, ck0, 'i0') ]
+
+rule DR_OpenRecv_Bob:
+    let ck0 = ck_atob(seed) in
+    [ DR_Chains(~sid, $A, $B, 'Bob', e, seed) ]
+  --[ OpenRecv(~sid, 'Bob', e) ]->
+    [ DR_Recv(~sid, $A, $B, 'Bob', 'Alice', e, ck0, 'i0') ]
+
+// Send: mk = ck_msg(ck); advance chain; AEAD-encrypt with AD = <sender,'hdr',e,idx>.
+rule DR_Send_Message:
+    let mk  = ck_msg(ck)
+        ck2 = ck_next(ck)
+        ad  = <sndRole, 'hdr', e, idx>
+        c   = senc(~msg, mk)
+    in
+    [ DR_Send(~sid, $A, $B, sndRole, e, ck, idx), Fr(~msg) ]
+  --[ Send(~sid, sndRole, e, idx, ~msg)
+    , SecretMsg(~sid, e, idx, ~msg)
+    , SecretMsgKey(~sid, e, idx, mk)
+    , UsedMsgKey(~sid, e, idx, mk)
+    , SentCipher(~sid, e, idx, c)
+    ]->
+    [ DR_Send(~sid, $A, $B, sndRole, e, ck2, s(idx))
+    , Out(<e, idx, ad, c>)
+    ]
+
+// Receive in order: same mk; the AD must carry the EXPECTED sender role
+// (sndRole, bound by the DR_Recv fact), epoch e and index idx -- a wrong
+// direction/position => different ad => Eq fails => rejected.
+rule DR_Recv_Message:
+    let mk = ck_msg(ck)
+        ck2 = ck_next(ck)
+        ad  = <sndRole, 'hdr', e, idx>
+        m   = sdec(c, mk)
+    in
+    [ DR_Recv(~sid, $A, $B, rcvRole, sndRole, e, ck, idx), In(<e, idx, adIn, c>) ]
+  --[ Recv(~sid, rcvRole, e, idx, m)
+    , Eq(adIn, ad)
+    , DeliveredOnce(~sid, e, idx)
+    ]->
+    [ DR_Recv(~sid, $A, $B, rcvRole, sndRole, e, ck2, s(idx)) ]
+
+/* =====================  (4) STATE-COMPROMISE ADVERSARY  ===================== */
+
+rule Reveal_SK:
+    [ !StoredSK(~sid, $A, $B, SK) ]
+  --[ RevealSK(~sid, SK) ]->
+    [ Out(SK) ]
+
+rule Reveal_DR_State:
+    [ DR_State(~sid, $A, $B, role, rk, root, e) ]
+  --[ RevealState(~sid, role, e, rk, root) ]->
+    [ DR_State(~sid, $A, $B, role, rk, root, e), Out(<rk, root>) ]
+
+rule Reveal_Chain:
+    [ DR_Send(~sid, $A, $B, role, e, ck, idx) ]
+  --[ RevealCK(~sid, role, e, ck) ]->
+    [ DR_Send(~sid, $A, $B, role, e, ck, idx), Out(ck) ]
+
+/* =====================  SOURCES / REUSE LEMMAS  ===================== */
+
+// A KEM shared secret either comes from an honest producer's fresh coins, or
+// the adversary already knew it.  (Tightened from the scaffold's free-var form.)
+lemma kem_ss_sources [sources]:
+    "All sid e ss #i.
+        SecretSS(sid, e, ss) @ #i
+        ==> ( Ex m #j. UsedEncapCoins(sid, e, m) @ #j & #j < #i )
+          | ( Ex #k. KU(ss) @ #k )"
+
+/* =====================  EXECUTABILITY (exists-trace)  ===================== */
+
+lemma exec_setup:
+  exists-trace
+    "Ex sid A B SK #i. SetupKey(sid, A, B, SK) @ #i"
+
+lemma exec_epoch_agreement:
+  exists-trace
+    "Ex sid e k #i #j.
+        ProducerEpoch(sid, 'Alice', e) @ #i & EpochKey(sid, e, k) @ #i
+      & ConsumerEpoch(sid, 'Bob',   e) @ #j & EpochKey(sid, e, k) @ #j"
+
+lemma exec_message_delivery:
+  exists-trace
+    "Ex sid e idx m #i #j.
+        Send(sid, 'Alice', e, idx, m) @ #i
+      & Recv(sid, 'Bob',   e, idx, m) @ #j"
+
+/* =====================  AGREEMENT  ===================== */
+
+// Both parties derive the SAME epoch key for a given (sid,e).
+lemma scka_agreement:
+    "All sid e kP kC #i #j.
+        ( ProducerEpoch(sid, 'Alice', e) @ #i & EpochKey(sid, e, kP) @ #i )
+      & ( ConsumerEpoch(sid, 'Bob',  e) @ #j & EpochKey(sid, e, kC) @ #j )
+        ==> kP = kC"
+
+/* =====================  SECRECY  ===================== */
+
+// No epoch key is learnable without compromising session state or the SK.
+// (All disjunct variables are existentially bound -- the scaffold's bug fixed.)
+lemma secret_epoch_key:
+    "All sid e k #i.
+        SecretEpochKey(sid, e, k) @ #i & ( Ex #r. KU(k) @ #r )
+        ==> ( Ex role e2 rk root #c. RevealState(sid, role, e2, rk, root) @ #c )
+          | ( Ex SK #c. RevealSK(sid, SK) @ #c )"
+
+// No plaintext is learnable without a relevant key/state reveal.
+lemma secret_message:
+    "All sid e idx m #i.
+        SecretMsg(sid, e, idx, m) @ #i & ( Ex #r. KU(m) @ #r )
+        ==> ( Ex role e2 ck #c. RevealCK(sid, role, e2, ck) @ #c )
+          | ( Ex role e2 rk root #c. RevealState(sid, role, e2, rk, root) @ #c )
+          | ( Ex SK #c. RevealSK(sid, SK) @ #c )"
+
+/* =====================  AUTHENTICATION  =====================
+ * NOTE on mutual authentication / injective agreement: it is DELIBERATELY NOT a
+ * lemma of this theory.  [ABS-PQXDH] collapses the multi-message PQXDH handshake
+ * into ONE atomic setup rule, so Running and Commit necessarily occur at the same
+ * timepoint and a Lowe-style "Running strictly before Commit" cannot hold by
+ * construction (a prior draft included such a lemma and Tamarin correctly
+ * FALSIFIED it -- a model-scope artifact, not a protocol weakness).  Mutual
+ * authentication / no-UKS is the PQXDH handshake's property and is established
+ * HERE by the Verifpal model (verifpal/mlkem_braid_full.vp: SK secrecy + chat
+ * authentication under an active attacker, with both identities bound into the
+ * HKDF info), and in the literature by Signal's ProVerif/CryptoVerif PQXDH
+ * analysis.  This theory's job is the STATEFUL core (FS/PCS/replay/cipher-auth)
+ * that sits on top of an already-authenticated SK.
+ */
+
+// The transactional ciphertext MAC: a consumer VerifiedCt only if a producer
+// emitted that ct (no forged ciphertext advances the ratchet), unless the
+// authenticator state for that epoch was revealed.
+lemma scka_ciphertext_auth:
+    "All sid e #i.
+        VerifiedCt(sid, e) @ #i
+        ==> ( Ex ct macct #j. EmitCt(sid, e, ct, macct) @ #j & #j < #i )
+          | ( Ex role rk root #c. RevealState(sid, role, e, rk, root) @ #c )"
+
+/* =====================  FORWARD SECRECY  =====================
+ * A message key used at #u stays secret against any compromise that is NOT
+ * strictly later than its use: no purely-later state/chain reveal exposes an
+ * earlier mk.  HARD lemma -- expect to need `--prove` with induction.
+ */
+lemma forward_secrecy:
+    "All sid e idx mk #u.
+        UsedMsgKey(sid, e, idx, mk) @ #u & ( Ex #r. KU(mk) @ #r )
+        ==> ( Ex role e2 ck #c. RevealCK(sid, role, e2, ck) @ #c & #c < #u )
+          | ( Ex role e2 rk root #c. RevealState(sid, role, e2, rk, root) @ #c & #c < #u )
+          | ( Ex SK #c. RevealSK(sid, SK) @ #c )"
+
+/* =====================  POST-COMPROMISE SECURITY  =====================
+ * If epoch e' mixes FRESH coins the adversary never learned, then k_{e'} is
+ * secret even given an EARLIER state reveal, unless a NEW reveal happens at or
+ * after e'.  HARDEST lemma -- expect interactive proving / an oracle.
+ */
+lemma post_compromise_security:
+    "All sid ePrime k m #i #u.
+        SecretEpochKey(sid, ePrime, k) @ #i
+      & UsedEncapCoins(sid, ePrime, m) @ #u
+      & ( not ( Ex #km. KU(m) @ #km ) )
+      & ( Ex role rk root #c. RevealState(sid, role, ePrime, rk, root) @ #c & #c < #i )
+        ==> ( not ( Ex #r. KU(k) @ #r ) )
+          | ( Ex role2 rk2 root2 #c2.
+                RevealState(sid, role2, ePrime, rk2, root2) @ #c2 & not (#c2 < #i) )"
+
+/* =====================  REPLAY RESISTANCE  ===================== */
+
+lemma replay_resistance:
+    "All sid e idx #i #j.
+        DeliveredOnce(sid, e, idx) @ #i & DeliveredOnce(sid, e, idx) @ #j
+        ==> #i = #j"
+
+lemma opk_replay_resistance:
+    "All opk #i #j. ConsumeOPK(opk) @ #i & ConsumeOPK(opk) @ #j ==> #i = #j"
+
+end

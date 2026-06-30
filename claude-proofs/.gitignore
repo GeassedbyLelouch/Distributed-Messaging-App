@@ -1,0 +1,5 @@
+.tools/
+tla/states/
+results/*.json
+results/tlc.run.txt
+results/verifpal.verdicts.txt

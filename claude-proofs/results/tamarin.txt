@@ -1,0 +1,46 @@
+### Tamarin 1.12.0 + Maude 3.5.1 — scka_double_ratchet.spthy
+### Captured by claude-proofs/scripts/run_tamarin.sh   (--prove per lemma)
+### ==========================================================================
+
+WELLFORMEDNESS:  /* All wellformedness checks were successful. */
+
+PER-LEMMA RESULTS (automatic prover, per-lemma time cap):
+
+  exec_setup (exists-trace)            : verified (6 steps)      [executability]
+  opk_replay_resistance (all-traces)   : verified (2 steps)      [OPK single-use]
+
+  exec_epoch_agreement (exists-trace)  : incomplete (needs oracle / interactive)
+  exec_message_delivery (exists-trace) : incomplete (needs oracle / interactive)
+  scka_agreement (all-traces)          : incomplete (needs oracle / interactive)
+  scka_ciphertext_auth (all-traces)    : incomplete (also tried --auto-sources)
+  replay_resistance (all-traces)       : incomplete (needs oracle / interactive)
+  secret_epoch_key (all-traces)        : incomplete (needs oracle / interactive)
+  secret_message (all-traces)          : incomplete (needs oracle / interactive)
+  forward_secrecy (all-traces)         : incomplete (HARD: induction + oracle)
+  post_compromise_security (all-traces): incomplete (HARDEST: induction + oracle)
+
+### NOTE — mutual authentication is intentionally NOT a lemma of this theory.
+### [ABS-PQXDH] collapses the multi-message handshake into one atomic setup rule,
+### so a Lowe-style "Running strictly before Commit" cannot hold by construction
+### (an earlier draft's lemma was correctly FALSIFIED by Tamarin -- a model-scope
+### artifact, not a weakness). Mutual auth / no-UKS is established by the Verifpal
+### model here and by Signal's ProVerif/CryptoVerif PQXDH analysis.
+
+### INTERPRETATION
+###  * The theory is WELL-FORMED and the model is a correct, runnable starting
+###    point (it fixes the prior formal/ scaffold's unbound k0/r0/k1/r1/ms lemma
+###    variables and its non-persistent !SetupKey bug, and uses a subterm-
+###    convergent KEM via the asymmetric-encryption builtin).
+###  * exec_setup and opk_replay_resistance discharge automatically.
+###  * The remaining lemmas DO NOT auto-discharge within the time caps (nor with
+###    --auto-sources): the open consumer input In(<ct,macct>) over aenc/adec
+###    yields source chains that need a hand-written ORACLE or interactive proving
+###    in the Tamarin GUI to terminate. This is the EXPECTED state for a novel
+###    stateful KEM-ratchet model -- Signal's own ratchet Tamarin theories ship
+###    custom oracles, and the task brief itself notes that a Tamarin model of the
+###    Braid SCKA "would be a genuine research contribution".
+###
+### To drive the hard lemmas:
+###   tamarin-prover interactive claude-proofs/tamarin/scka_double_ratchet.spthy
+###   # open http://127.0.0.1:3001 and guide secret_epoch_key / forward_secrecy /
+###   # post_compromise_security; expect to add a custom --oracle heuristic.

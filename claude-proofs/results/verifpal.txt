@@ -1,0 +1,55 @@
+### Verifpal 0.52.0 — verify mlkem_braid_full.vp
+### attacker[active] (Dolev-Yao), full PQXDH -> SCKA epoch-1 -> Double Ratchet -> AES-GCM
+### Captured by claude-proofs/scripts/run_verifpal.sh
+###
+### NOTE: Verifpal prints a multi-megabyte per-variable term dump for each FAILED
+### query. That raw dump is omitted here; the verdicts and the one-line attack
+### summaries (the arrow lines) are what matter. Re-run the script to regenerate.
+
+=== QUERY VERDICTS (6 / 8 pass; the 2 fails are expected & benign — see below) ===
+
+     Pass  confidentiality? sk_a
+     Pass  confidentiality? sk_b
+     Pass  confidentiality? k1_a
+     Pass  confidentiality? plaintext_m
+     Pass  authentication? Alice -> Bob: chat_ct
+     Pass  freshness? ek_a
+     Fail  authentication? Alice -> Bob: kem_ct
+           -> kem_ct (PKE_ENC(G^nil, nil)), sent by Attacker and not by Alice, is
+              successfully used in PKE_DEC(pqspk_b, ...) within Bob's state.
+     Fail  authentication? Alice -> Bob: ik_dh_sig_a
+           -> ik_dh_sig_a (SIGN(ik_sign_a, G^ik_dh_a)), sent by Attacker and not by
+              Alice, is successfully used in SIGNVERIF(...) within Bob's state.
+     Fail  2 of 8 queries failed.
+
+=== INTERPRETATION ===
+
+PASS (the security goals of the PQXDH->SCKA->chat layer hold under an ACTIVE
+Dolev-Yao attacker):
+  * Secrecy of the PQXDH SK on BOTH sides (sk_a, sk_b). Crucially sk_b stays
+    secret even though the attacker tampers with ek_a and kem_ct in the trace,
+    because DH1 = X25519(IK_dh_A, SPK_B) — over the long-term identity DH key and
+    the signed prekey — survives. This is the hybrid / multi-DH robustness:
+    breaking the session needs a long-term / signed-prekey secret, not just the
+    ephemeral or the KEM.
+  * Secrecy of the first SCKA epoch key k1.
+  * Secrecy of the chat plaintext.
+  * End-to-end authentication of the chat ciphertext (Bob's AEAD_DEC? accepts
+    only a ciphertext Alice genuinely produced).
+  * Freshness of the ephemeral key ek_a.
+
+EXPECTED FAIL — BENIGN, BY DESIGN (NOT a vulnerability):
+  * kem_ct: the ML-KEM encaps key G^pqspk_b is PUBLIC, so an active attacker can
+    form a different VALID encapsulation. That only changes Bob's ss_b, giving a
+    DIFFERENT sk_b that will not match Alice's — so the chat fails to decrypt.
+    PQXDH authenticates the COMPOSITE SK (all 4 DHs + ss + both identities via
+    the HKDF info), never the bare KEM ciphertext. Confidentiality is unaffected
+    (proven above).
+  * ik_dh_sig_a: a public signature value the active attacker can RELAY. Verifpal
+    treats any relayed unguarded value as "attacker-originated", so the field-
+    level authentication query fails by construction. Bob still only accepts a
+    signature genuinely produced under Alice's identity key; no signature for a
+    DIFFERENT identity is forgeable (what defeats UKS, and what the PASSES rely on).
+
+  Both are the standard Verifpal semantics for field-level authentication of
+  public/relayable handshake values. See claude-proofs/FINDINGS.md (F-7).

@@ -1,0 +1,84 @@
+<h2>Contact Interface Layout</h2>
+<p class="subtitle">Signal-compatible username lookup: exact full username only, no directory, no prefix search.</p>
+
+<div class="mockup">
+  <div class="mockup-header">Preview: Braid Chat Contacts</div>
+  <div class="mockup-body">
+    <div style="display:grid;grid-template-columns:220px minmax(320px,1fr) 300px;min-height:520px;border:1px solid #d8dde6;background:#f7f8fa;color:#111827;font-family:Inter,system-ui,sans-serif">
+      <aside style="padding:18px 14px;border-right:1px solid #d8dde6;background:#fff">
+        <div style="font-weight:700;font-size:18px;margin-bottom:18px">ML-KEM Braid</div>
+        <div style="font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">Device</div>
+        <div style="padding:10px;border:1px solid #d8dde6;border-radius:6px;margin-bottom:18px">
+          <div style="font-weight:650">Alice</div>
+          <div style="font-size:12px;color:#6b7280">Alice.42</div>
+        </div>
+        <nav style="display:grid;gap:6px;font-size:14px">
+          <div style="padding:9px;border-left:3px solid #2563eb;background:#eff6ff">Contacts</div>
+          <div style="padding:9px;color:#4b5563">Requests</div>
+          <div style="padding:9px;color:#4b5563">Settings</div>
+        </nav>
+      </aside>
+
+      <main style="padding:18px 20px;background:#f7f8fa">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+          <div>
+            <div style="font-size:22px;font-weight:700">Contacts</div>
+            <div style="font-size:13px;color:#6b7280">Search requires the exact username and discriminator.</div>
+          </div>
+          <button style="border:0;background:#2563eb;color:white;border-radius:6px;padding:9px 12px;font-weight:650">Start chat</button>
+        </div>
+
+        <section style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-bottom:18px">
+          <input value="Bob.1042" style="height:38px;border:1px solid #cbd5e1;border-radius:6px;padding:0 10px;background:#fff;font-size:14px" />
+          <button style="border:1px solid #1d4ed8;background:#2563eb;color:#fff;border-radius:6px;padding:0 14px;font-weight:650">Find</button>
+        </section>
+
+        <div style="display:grid;gap:8px">
+          <div style="display:grid;grid-template-columns:1fr auto;align-items:center;padding:12px;border:1px solid #d8dde6;background:#fff;border-radius:6px">
+            <div>
+              <div style="font-weight:650">Bob</div>
+              <div style="font-size:12px;color:#6b7280">Bob.1042 · identity verified</div>
+            </div>
+            <button style="border:1px solid #cbd5e1;background:#fff;border-radius:6px;padding:7px 10px">Open</button>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr auto;align-items:center;padding:12px;border:1px solid #d8dde6;background:#fff;border-radius:6px">
+            <div>
+              <div style="font-weight:650">Casey</div>
+              <div style="font-size:12px;color:#6b7280">Casey.77 · pending request</div>
+            </div>
+            <button style="border:1px solid #cbd5e1;background:#fff;border-radius:6px;padding:7px 10px">Review</button>
+          </div>
+        </div>
+      </main>
+
+      <aside style="padding:18px;border-left:1px solid #d8dde6;background:#fff">
+        <div style="font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px">Selected contact</div>
+        <div style="font-size:20px;font-weight:700;margin-bottom:4px">Bob</div>
+        <div style="font-size:13px;color:#6b7280;margin-bottom:16px">Bob.1042</div>
+        <div style="display:grid;gap:8px;font-size:13px;margin-bottom:18px">
+          <div><strong>Lookup:</strong> exact username hash</div>
+          <div><strong>Stored:</strong> username hash + profile label</div>
+          <div><strong>Shared:</strong> no phone number required</div>
+        </div>
+        <button style="width:100%;border:0;background:#111827;color:#fff;border-radius:6px;padding:10px 12px;font-weight:650">Send request</button>
+      </aside>
+    </div>
+  </div>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="approve-layout" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Use this layout direction</h3>
+      <p>Three-pane contact workspace with minimal registration, exact username lookup, and per-user contact context.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="revise-layout" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Revise the layout</h3>
+      <p>Keep the backend behavior but adjust navigation, density, or visual hierarchy before spec.</p>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,172 @@
+// =============================================================================
+//  mlkem_braid_full.vp  --  Verifpal symbolic (Dolev-Yao) model of the full
+//  PQXDH -> ML-KEM Braid (epoch 1) -> Double Ratchet -> AES-GCM chat flow.
+//
+//  *** RUN with Verifpal 0.52.0. ***  Output: claude-proofs/results/verifpal.txt
+//  Interpretation: claude-proofs/README.md.
+//
+//  Authoritative sources (behaviour read byte-exact from these):
+//    ml_kem_braid/pqxdh/pqxdh.py          -- four DHs, ML-KEM encaps, SK fold,
+//                                            info=PQXDH_INFO||IK_A||IK_B, ik_dh_sig
+//    ml_kem_braid/core/kdf.py             -- KDF_OK (epoch key)
+//    ml_kem_braid/core/double_ratchet.py  -- KDF_RK, directional chain, KDF_CK
+//    ml_kem_braid/core/aead.py            -- AES-256-GCM
+//
+//  ABSTRACTIONS (each justified; full discussion in claude-proofs/README.md):
+//   * ML-KEM via Verifpal PKE_ENC/PKE_DEC (KEM idiom): a Dolev-Yao attacker
+//     without the decaps key cannot recover the shared secret -- the symbolic
+//     image of IND-CCA secrecy. The incremental ct1/ct2 split is the EasyCrypt
+//     obligation, not here; PQXDH uses monolithic ML-KEM-1024.
+//   * HKDF has Verifpal's fixed (salt,ikm,info)->(a,b) shape; the real
+//     byte-concatenated ikm and exact label strings are abstracted. The chained
+//     fold preserves the essential property: SK depends on EVERY DH and the KEM
+//     ss AND on both identity signing keys (the UKS defence).
+//   * One epoch / one message. FS/PCS across epochs and OPK cross-session
+//     single-use are the Tamarin targets (Verifpal is bounded, no mutable state).
+// =============================================================================
+
+attacker[active]
+
+// -----------------------------------------------------------------------------
+//  Bob (responder): long-term identity + signed prekey bundle.
+// -----------------------------------------------------------------------------
+principal Bob[
+    knows private ik_sign_b           // Ed25519 identity signing key
+    knows private ik_dh_b             // X25519 identity DH key
+    knows private spk_b               // signed X25519 prekey
+    knows private opk_b               // one-time X25519 prekey
+    knows private pqspk_b             // ML-KEM-1024 decaps key (PKE idiom)
+
+    gik_sign_b = G^ik_sign_b
+    gik_dh_b   = G^ik_dh_b
+    gspk_b     = G^spk_b
+    gopk_b     = G^opk_b
+    gpqspk_b   = G^pqspk_b            // ML-KEM-1024 encapsulation key (PQSPK_B)
+
+    ik_dh_sig_b = SIGN(ik_sign_b, gik_dh_b)   // binds DH key to identity (bundle.verify)
+    spk_sig_b   = SIGN(ik_sign_b, gspk_b)
+    pqspk_sig_b = SIGN(ik_sign_b, gpqspk_b)
+]
+
+// Bundle publication. Guarded [..] constants: the attacker may READ them but
+// cannot silently substitute them, so the signature checks are what authorise A.
+Bob -> Alice: [gik_sign_b], gik_dh_b, ik_dh_sig_b, gspk_b, spk_sig_b, gpqspk_b, pqspk_sig_b, gopk_b
+
+// -----------------------------------------------------------------------------
+//  Alice (initiator): verify bundle, run PQXDH, derive SK -> k1 -> DR mk, and
+//  send one AEAD chat message. ik_dh_sig_a is computed HERE, before the message
+//  that carries it (fixing the unparseable two-block split in the prior scaffold).
+// -----------------------------------------------------------------------------
+principal Alice[
+    knows private ik_sign_a
+    knows private ik_dh_a
+    knows private plaintext_m         // the secret chat message
+    generates ek_a                    // fresh ephemeral X25519 key
+
+    gik_sign_a = G^ik_sign_a
+    gik_dh_a   = G^ik_dh_a
+    gek_a      = G^ek_a
+
+    // Verify B's bundle signatures before any DH (faithful to bundle.verify()).
+    _ = SIGNVERIF(gik_sign_b, gik_dh_b, ik_dh_sig_b)?
+    _ = SIGNVERIF(gik_sign_b, gspk_b,   spk_sig_b)?
+    _ = SIGNVERIF(gik_sign_b, gpqspk_b, pqspk_sig_b)?
+
+    // Alice's identity-binding signature over her own X25519 DH key.
+    ik_dh_sig_a = SIGN(ik_sign_a, gik_dh_a)
+
+    // Four X25519 DHs (pqxdh.py initiator_handshake).
+    dh1_a = gspk_b^ik_dh_a            // DH1 = X25519(IK_dh_A, SPK_B)
+    dh2_a = gik_dh_b^ek_a             // DH2 = X25519(EK_A,    IK_dh_B)
+    dh3_a = gspk_b^ek_a               // DH3 = X25519(EK_A,    SPK_B)
+    dh4_a = gopk_b^ek_a               // DH4 = X25519(EK_A,    OPK_B)
+
+    // ML-KEM-1024 encapsulation (PKE idiom): fresh shared secret ss_a under PQSPK_B.
+    generates ss_a
+    kem_ct = PKE_ENC(gpqspk_b, ss_a)
+
+    // SK = chained HKDF fold over {DH1..DH4, ss} then bind BOTH identities (UKS).
+    sk_a1, ja1 = HKDF(dh1_a, dh2_a, dh3_a)
+    sk_a2, ja2 = HKDF(sk_a1, dh4_a, ss_a)
+    sk_a,  ja3 = HKDF(sk_a2, gik_sign_a, gik_sign_b)
+
+    // First SCKA epoch key k1 (KDF_OK seeded by the handshake secret at epoch 1).
+    k1_a, ja4 = HKDF(sk_a, sk_a, gik_sign_a)
+
+    // Double Ratchet: root step on k1, directional chain A->B, one message key.
+    rk_seed_a, ja5 = HKDF(sk_a, k1_a, gik_sign_a)
+    ck_atob_a, ja6 = HKDF(rk_seed_a, nil, gik_dh_a)   // CK_{A->B} (info="A->B" abstracted)
+    mk_a = MAC(ck_atob_a, nil)                         // mk = HMAC(ck, 0x01)
+
+    // AEAD chat: AD binds the directional identities (chat AD + header abstracted).
+    ad_a = CONCAT(gik_sign_a, gik_sign_b)
+    chat_ct = AEAD_ENC(mk_a, plaintext_m, ad_a)
+]
+
+// A -> B: the PQXDH InitialMessage fields + the first AEAD chat envelope.
+Alice -> Bob: [gik_sign_a], gik_dh_a, ik_dh_sig_a, gek_a, kem_ct, chat_ct
+
+// -----------------------------------------------------------------------------
+//  Bob (responder): authenticate A's identity binding, recompute SK/k1/mk, decrypt.
+// -----------------------------------------------------------------------------
+principal Bob[
+    _ = SIGNVERIF(gik_sign_a, gik_dh_a, ik_dh_sig_a)?   // responder verifies ik_dh_sig
+
+    dh1_b = gik_dh_a^spk_b            // DH1 = X25519(SPK_B, IK_dh_A)
+    dh2_b = gek_a^ik_dh_b             // DH2 = X25519(IK_dh_B, EK_A)
+    dh3_b = gek_a^spk_b              // DH3 = X25519(SPK_B,  EK_A)
+    dh4_b = gek_a^opk_b              // DH4 = X25519(OPK_B,  EK_A)
+
+    ss_b = PKE_DEC(pqspk_b, kem_ct)
+
+    sk_b1, jb1 = HKDF(dh1_b, dh2_b, dh3_b)
+    sk_b2, jb2 = HKDF(sk_b1, dh4_b, ss_b)
+    sk_b,  jb3 = HKDF(sk_b2, gik_sign_a, gik_sign_b)
+
+    k1_b, jb4 = HKDF(sk_b, sk_b, gik_sign_a)
+    rk_seed_b, jb5 = HKDF(sk_b, k1_b, gik_sign_a)
+    ck_atob_b, jb6 = HKDF(rk_seed_b, nil, gik_dh_a)
+    mk_b = MAC(ck_atob_b, nil)
+
+    ad_b = CONCAT(gik_sign_a, gik_sign_b)
+    recovered_m = AEAD_DEC(mk_b, chat_ct, ad_b)?
+]
+
+// =============================================================================
+//  QUERIES
+// =============================================================================
+queries[
+    // ---- PASS: the security GOALS of this layer ----------------------------
+    // Confidentiality of the handshake secret, the first epoch key, the message.
+    // sk_b stays secret even under the ACTIVE attacker who tampers with ek_a /
+    // kem_ct, because DH1 (over the long-term identity DH + signed prekey)
+    // survives -- the hybrid / multi-DH robustness of PQXDH.
+    confidentiality? sk_a
+    confidentiality? sk_b
+    confidentiality? k1_a
+    confidentiality? plaintext_m
+
+    // End-to-end message authentication: Bob's AEAD_DEC? accepts only a chat
+    // ciphertext genuinely produced by Alice (no forged/injected ciphertext).
+    authentication? Alice -> Bob: chat_ct
+
+    // Freshness of the ephemeral key (not replayable across runs).
+    freshness? ek_a
+
+    // ---- EXPECTED FAIL (BENIGN, BY DESIGN) ---------------------------------
+    // These two FAIL, and that is CORRECT, not a vulnerability.  PQXDH does NOT
+    // authenticate individual handshake fields; it authenticates the COMPOSITE
+    // SK (which binds all four DHs, the KEM ss, and both identities).
+    //   * kem_ct: the encaps key G^pqspk_b is public, so an active attacker can
+    //     produce a different VALID encapsulation. That only changes Bob's ss_b,
+    //     yielding a DIFFERENT sk_b that will not match Alice's -- the chat then
+    //     fails to decrypt. Confidentiality (above) is unaffected.
+    //   * ik_dh_sig_a: a public signature value the active attacker can RELAY
+    //     (Verifpal flags relayed unguarded values as attacker-originated). Bob
+    //     still only accepts a signature genuinely under Alice's identity key;
+    //     no signature for a DIFFERENT identity is forgeable.
+    // We keep them to document, transparently, that field-level authentication
+    // is intentionally NOT a goal here. See claude-proofs/FINDINGS.md (F-7).
+    authentication? Alice -> Bob: kem_ct
+    authentication? Alice -> Bob: ik_dh_sig_a
+]

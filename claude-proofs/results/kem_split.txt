@@ -1,0 +1,30 @@
+==============================================================================
+ML-KEM Braid split  ==  FIPS-203 ML-KEM   (empirical Lemma-1 / Lemma-2 check)
+trials per keypair = 200, keypairs per variant = 3
+==============================================================================
+
+[PASS] ML-KEM-512   (600 total encapsulations)
+    Lemma1  split==reference (ct & K) : 600/600
+    Lemma1  decaps(ct1||ct2)==K       : 600/600
+    Lemma2  ct1 = f(ek_seed,hek,m)    : 600/600
+    Lemma2  K independent of ct2      : 600/600
+    FO^bot  implicit rejection        : 600/600
+
+[PASS] ML-KEM-768   (600 total encapsulations)
+    Lemma1  split==reference (ct & K) : 600/600
+    Lemma1  decaps(ct1||ct2)==K       : 600/600
+    Lemma2  ct1 = f(ek_seed,hek,m)    : 600/600
+    Lemma2  K independent of ct2      : 600/600
+    FO^bot  implicit rejection        : 600/600
+
+[PASS] ML-KEM-1024   (600 total encapsulations)
+    Lemma1  split==reference (ct & K) : 600/600
+    Lemma1  decaps(ct1||ct2)==K       : 600/600
+    Lemma2  ct1 = f(ek_seed,hek,m)    : 600/600
+    Lemma2  K independent of ct2      : 600/600
+    FO^bot  implicit rejection        : 600/600
+
+==============================================================================
+RESULT: ALL CHECKS PASSED
+==============================================================================
+wrote claude-proofs/results/kem_split.json

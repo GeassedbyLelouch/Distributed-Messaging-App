@@ -1,0 +1,21 @@
+theory signed_contact_events
+begin
+
+builtins: signing
+
+rule CreateRequest:
+  [ Fr(~request_id), Fr(~conversation_id), !Ltk($requester, ~skR), !Pk($recipient, pk(~skB)) ]
+  --[ ContactRequest($requester, $recipient, ~request_id, ~conversation_id) ]->
+  [ Out(<$requester, $recipient, ~request_id, ~conversation_id, sign(<$recipient, ~request_id, ~conversation_id>, ~skR)>) ]
+
+rule AcceptRequest:
+  [ In(<$requester, $recipient, request_id, conversation_id, sigR>), !Ltk($recipient, ~skB), !Pk($requester, pkR) ]
+  --[ ContactAccepted($requester, $recipient, request_id, conversation_id) ]->
+  [ Out(<$recipient, $requester, request_id, conversation_id, sign(<$requester, request_id, conversation_id>, ~skB)>) ]
+
+lemma accept_requires_request:
+  "All requester recipient request_id conversation_id #i.
+     ContactAccepted(requester, recipient, request_id, conversation_id) @ #i
+     ==> (Ex #j. ContactRequest(requester, recipient, request_id, conversation_id) @ #j & #j < #i)"
+
+end

@@ -1,0 +1,392 @@
+// =============================================================================
+//  mlkem_braid.vp  —  Verifpal symbolic (Dolev-Yao) model of the ML-KEM Braid
+//                     post-quantum E2EE chat handshake.
+//
+//  SCOPE OF THIS MODEL (first-pass, bounded):
+//      PQXDH handshake  ->  first SCKA epoch key k_1  ->  one Double-Ratchet
+//      AES-256-GCM (AEAD) chat message  A -> B.
+//
+//  Authoritative source:  docs/PROTOCOL_SPEC.md  (byte-exact KDF labels/salts)
+//                         ml_kem_braid/pqxdh/pqxdh.py        (PQXDH)
+//                         ml_kem_braid/core/kdf.py           (KDF_OK)
+//                         ml_kem_braid/core/double_ratchet.py(KDF_RK/CK)
+//
+//  *** STATUS: SCAFFOLD / PLAN — NOT YET RUN, NOTHING PROVEN. ***
+//  This file is written to be syntactically real Verifpal, but it has NOT been
+//  executed by the tool. Treat every "query" result claim below as a
+//  HYPOTHESIS until a human runs `verifpal verify mlkem_braid.vp` and reads the
+//  analysis output. Search for "TODO" / "ABSTRACTION" markers for every place a
+//  human must review or complete.
+//
+// -----------------------------------------------------------------------------
+//  HOW TO INSTALL & RUN
+// -----------------------------------------------------------------------------
+//  Verifpal is a single static Go binary (https://verifpal.com).
+//
+//    # Install (one of):
+//    #   - Download release binary:  https://verifpal.com/  (verify SHA256)
+//    #   - Or via Go:                go install verifpal.com/cmd/verifpal@latest
+//    #   - Homebrew:                 brew install verifpal      (if tapped)
+//    #
+//    # Recommended pinned version for this model: Verifpal >= 0.27.x
+//    # (uses the `principal`, `phase`, `queries`, `attacker[active]` idioms below)
+//
+//    verifpal verify mlkem_braid.vp
+//
+//  Optional (interactive graph of the analysis):
+//    verifpal pretty mlkem_braid.vp      # echoes / canonicalises the model
+//
+// -----------------------------------------------------------------------------
+//  WHAT A CLEAN RESULT LOOKS LIKE
+// -----------------------------------------------------------------------------
+//  Verifpal prints, for each `queries{}` line, one of:
+//
+//    "<query> : when ... is obtained by Verifpal ... " — i.e. it found an attack
+//        => the query is VIOLATED. Verifpal prints the deductive trace.
+//
+//    "<query> : ... was not obtained by the attacker / authentication holds"
+//        => the query HOLDS in this model under the stated abstractions.
+//
+//  A "clean" run for THIS model means:
+//    * confidentiality_SK            HOLDS
+//    * confidentiality_epoch_key_k1  HOLDS
+//    * confidentiality_message       HOLDS
+//    * authentication_message_A_to_B HOLDS (B accepts m only if A sent it)
+//    * freshness_opk / UKS check     HOLDS
+//
+//  IMPORTANT: a "HOLDS" in Verifpal is a SYMBOLIC (Dolev-Yao) result only. It is
+//  NOT a computational/PQ proof, NOT a forward-secrecy proof across many epochs,
+//  and NOT a substitute for the Tamarin / CryptoVerif / EasyCrypt obligations in
+//  the verification matrix (docs/PROTOCOL_SPEC.md §A).
+//
+// =============================================================================
+//  MODELING DECISIONS, ABSTRACTIONS, AND THEIR JUSTIFICATIONS
+// -----------------------------------------------------------------------------
+//  Verifpal's built-in primitive vocabulary is small and FIXED (you cannot
+//  declare new primitives). It provides, among others:
+//      G^x                          -- Diffie-Hellman (X25519 abstraction)
+//      HKDF(salt, ikm, info)        -- 3-arg key derivation (returns up to 5 keys)
+//      MAC(key, message)            -- keyed MAC / HMAC abstraction
+//      AEAD_ENC(key, plaintext, ad) / AEAD_DEC(key, ciphertext, ad)
+//      SIGN(privkey, message) / SIGNVERIF(G^privkey, message, signature)
+//      PKE_ENC(G^k, m) / PKE_DEC(k, c)   -- public-key encryption (KEM/PKE idiom)
+//      ENC/DEC, HASH, CONCAT/SPLIT, RINGSIGN, SHAMIR_*  -- (unused here)
+//
+//  (1) ===== X25519 four-DH  (DH1..DH4) =====
+//      X25519 maps DIRECTLY to Verifpal's `G^x` and `(G^y)^x` idiom. Each DH in
+//      PQXDH is a fresh `^`-product of the two relevant private/public keys:
+//          DH1 = X25519(IK_dh_A, SPK_B)   ->  spk_pub_B ^ ikdh_A   (= G^(b_spk * a_ik))
+//          DH2 = X25519(EK_A,   IK_dh_B)  ->  ikdh_pub_B ^ ek_A
+//          DH3 = X25519(EK_A,   SPK_B)    ->  spk_pub_B  ^ ek_A
+//          DH4 = X25519(EK_A,   OPK_B)    ->  opk_pub_B  ^ ek_A
+//      This is faithful: Verifpal's `^` is the exact symbolic DH the spec needs.
+//
+//  (2) ===== ML-KEM-1024 KEM  (the PQ leg) =====
+//      ABSTRACTION (important): Verifpal has NO native KEM primitive and NO way
+//      to declare one. We model ML-KEM IND-CCA encapsulation using Verifpal's
+//      PUBLIC-KEY ENCRYPTION idiom PKE_ENC / PKE_DEC:
+//
+//          B owns ML-KEM decaps key  m  with public encaps key  G^m  (= PQSPK_B).
+//          A samples a fresh secret `ss` (the KEM shared secret) and "encapsulates"
+//          it:                kem_ct = PKE_ENC(G^m, ss)
+//          B decapsulates:    ss     = PKE_DEC(m, kem_ct)
+//
+//      This captures EXACTLY the symbolic guarantee we want from an IND-CCA KEM:
+//        * `ss` is confidential unless the attacker learns the decaps key `m`;
+//        * a Dolev-Yao attacker who does not know `m` cannot recover `ss` from
+//          `kem_ct`, and (PKE_ENC being a randomised/secret-carrying primitive)
+//          cannot forge an encapsulation that decapsulates to a chosen value
+//          without the public key — matching IND-CCA secrecy in the symbolic model.
+//      ABSTRACTED AWAY (out of Verifpal's reach — see Tamarin/EasyCrypt):
+//        * the *computational* IND-CCA reduction and PQ hardness assumption;
+//        * the INCREMENTAL split ct = ct1‖ct2 and its "byte-for-byte == reference"
+//          lemma (that is the EasyCrypt obligation, docs/PROTOCOL_SPEC.md §2);
+//          here we model only the MONOLITHIC encaps used by PQXDH prekeys, which
+//          is the correct abstraction for the handshake leg.
+//      TODO(human): if you want to probe whether leaking ct1 early helps the
+//      attacker, that is NOT expressible faithfully here — defer to Tamarin/EC.
+//
+//  (3) ===== HKDF / SK derivation =====
+//      ABSTRACTION: the real SK is
+//          SK = HKDF(ikm=0xff^32‖DH1‖DH2‖DH3‖DH4‖ss, salt=0x00^32,
+//                    info="MLKEMBraid_PQXDH_CURVE25519_SHA-256_ML-KEM-1024"
+//                         ‖ IK_sign_A ‖ IK_sign_B)
+//      Verifpal HKDF has the fixed shape HKDF(salt, ikm, info) and returns
+//      multiple keys; it does NOT model byte concatenation of many secrets into
+//      one ikm. We therefore FOLD the five DH/KEM secrets pairwise with HKDF and
+//      bind the identity-signing public keys (the UKS defence) by feeding them in
+//      as the `info`/salt arguments. This preserves the essential symbolic
+//      property — SK depends on ALL of {DH1,DH2,DH3,DH4,ss} AND on both identity
+//      signing keys — but the exact byte layout / label string is ABSTRACTED.
+//      Verifpal cannot check label-string correctness; that is a code/spec audit
+//      item and a Tamarin `KDF` equational obligation. TODO(human): confirm the
+//      pairwise fold below still requires EVERY secret (it does, by construction)
+//      and that the identity binding cannot be stripped (UKS query below tests it).
+//
+//  (4) ===== Identity binding: ik_dh_sig =====
+//      Modeled faithfully with SIGN/SIGNVERIF: each party signs its X25519 DH
+//      public key with its Ed25519 identity key, and the peer verifies before any
+//      DH. Ed25519 is abstracted as Verifpal's generic signature primitive.
+//
+//  (5) ===== One-time prekey (OPK) freshness =====
+//      Modeled as a fresh secret `opk` generated by B and used in DH4. Verifpal is
+//      BOUNDED and does not natively model "consume-on-use" mutable server state.
+//      The single-use / replay-resistance property (OPK deleted after first use)
+//      is therefore only PARTIALLY captured (we model one fresh OPK per session).
+//      TRUE replay/consume semantics across sessions => Tamarin (mutable state).
+//      TODO(human): add a second `phase` re-injecting the same InitialMessage to
+//      probe replay if desired; note Verifpal will treat the OPK as still-fresh,
+//      so a clean Verifpal result here does NOT prove single-use enforcement.
+//
+//  (6) ===== SCKA first epoch key k_1 =====
+//      Real: KDF_OK(ss, e) = HKDF(ikm=ss, salt=0x00^32,
+//                                 info="MLKEMBraid_MLKEM768_HMAC-SHA256:SCKA Key"‖i8(e)).
+//      Here we derive the first epoch key k_1 by an HKDF step keyed by SK (the
+//      authenticator/ratchet is SEEDED by SK at epoch 1 per spec §0). We do NOT
+//      model the 11-state SCKA machine, erasure coding, or the ratcheted MAC
+//      authenticator across epochs — those are Tamarin/TLA+ territory. We model
+//      exactly ONE epoch key, sufficient for the "first epoch -> first message"
+//      flow. ABSTRACTION: epoch counter `e` and i8(e) label bytes are dropped.
+//
+//  (7) ===== Double Ratchet root + chain + message key =====
+//      Real: KDF_RK(rk, k_e) -> (rk', seed); CK_AtoB = HKDF(seed, info="A->B");
+//            KDF_CK: mk = HMAC(ck, 0x01), ck' = HMAC(ck, 0x02).
+//      We model: rk seeded from SK; one root step on k_1; directional chain
+//      A->B via an HKDF `info` separation; one message key mk = MAC(ck, c1).
+//      The A->B vs B->A DOMAIN SEPARATION is modeled (distinct `info`) so the
+//      single-message direction is faithful. Multi-message chaining, MAX_SKIP,
+//      out-of-order caching, and FS-across-messages are NOT modeled (Verifpal is
+//      bounded; defer to Tamarin/Squirrel).
+//
+//  (8) ===== AEAD chat message =====
+//      AES-256-GCM modeled as Verifpal AEAD_ENC/AEAD_DEC. Associated data AD =
+//      directional identity binding + header (epoch,index) is modeled as a
+//      CONCAT of the relevant public identifiers, so tampering AD is detectable.
+//
+//  WHAT THIS MODEL CANNOT CAPTURE (defer to Tamarin model, formal/tamarin/):
+//      - Forward secrecy / PCS across many epochs & messages (unbounded ratchet).
+//      - SCKA state-machine correctness, no-deadlock, one-key-per-epoch (TLA+).
+//      - OPK true single-use / cross-session replay (mutable server state).
+//      - The incremental KEM split == reference lemma (EasyCrypt).
+//      - Computational PQ/hybrid hardness (CryptoVerif/EasyCrypt).
+//      - Constant-time / side channels (out of every symbolic model).
+// =============================================================================
+
+attacker[active]
+
+// -----------------------------------------------------------------------------
+//  Principal B (Bob, responder) — publishes a signed PQXDH prekey bundle.
+// -----------------------------------------------------------------------------
+//  Long-term identity:
+//    ik_sign_b : Ed25519 identity SIGNING key   (public = G^ik_sign_b)
+//    ik_dh_b   : X25519 identity DH key          (public = G^ik_dh_b)
+//  Prekeys (all signed by ik_sign_b):
+//    spk_b   : signed X25519 prekey
+//    opk_b   : one-time X25519 prekey  (ABSTRACTION: single fresh OPK; see note 5)
+//    pqspk_b : ML-KEM-1024 decaps key  (public encaps key = G^pqspk_b; PKE idiom)
+// -----------------------------------------------------------------------------
+principal Bob[
+    knows private ik_sign_b
+    knows private ik_dh_b
+    knows private spk_b
+    knows private opk_b
+    knows private pqspk_b
+
+    // Public keys derived from privates.
+    // G^ik_dh_b , G^spk_b , G^opk_b are X25519 publics.
+    // G^pqspk_b is the ML-KEM-1024 encaps key (PQSPK_B) in the PKE idiom.
+
+    // Identity binding signatures (binds each X25519 key to Ed25519 identity).
+    ik_dh_sig_b = SIGN(ik_sign_b, G^ik_dh_b)   // binds ik_dh_b to identity
+    spk_sig_b   = SIGN(ik_sign_b, G^spk_b)     // signed prekey signature
+    pqspk_sig_b = SIGN(ik_sign_b, G^pqspk_b)   // signed PQ prekey signature
+]
+
+// Bundle publication (public; the relay forwards these unmodified to A).
+// Verifpal: sending G^x publishes the public key to the attacker-controlled net.
+Bob -> Alice: G^ik_sign_b, [G^ik_dh_b], ik_dh_sig_b,
+              [G^spk_b], spk_sig_b,
+              [G^pqspk_b], pqspk_sig_b,
+              [G^opk_b]
+// NOTE: brackets [..] declare "guarded" constants — the attacker may read them
+// but CANNOT swap them for an injected value without detection. We guard the raw
+// public keys that A authenticates by signature, so the UKS/identity-misbinding
+// query is meaningful. TODO(human): consider an unguarded variant to confirm the
+// signature checks are what actually prevent substitution.
+
+// -----------------------------------------------------------------------------
+//  Principal A (Alice, initiator) — verifies the bundle, runs PQXDH, derives SK,
+//  k_1, the DR message key, and sends one AEAD chat message.
+// -----------------------------------------------------------------------------
+principal Alice[
+    knows private ik_sign_a
+    knows private ik_dh_a
+    generates ek_a            // fresh ephemeral X25519 key per handshake
+
+    // --- verify B's bundle signatures before any DH (faithful to bundle.verify())
+    _ = SIGNVERIF(G^ik_sign_b, G^ik_dh_b, ik_dh_sig_b)?   // ik_dh binding
+    _ = SIGNVERIF(G^ik_sign_b, G^spk_b,   spk_sig_b)?      // signed prekey
+    _ = SIGNVERIF(G^ik_sign_b, G^pqspk_b, pqspk_sig_b)?    // signed PQ prekey
+
+    // --- four X25519 Diffie-Hellmans (note 1) -------------------------------
+    dh1_a = G^spk_b^ik_dh_a    // DH1 = X25519(IK_dh_A, SPK_B)
+    dh2_a = G^ik_dh_b^ek_a     // DH2 = X25519(EK_A,   IK_dh_B)
+    dh3_a = G^spk_b^ek_a       // DH3 = X25519(EK_A,   SPK_B)
+    dh4_a = G^opk_b^ek_a       // DH4 = X25519(EK_A,   OPK_B)
+
+    // --- ML-KEM-1024 encapsulation (note 2): fresh shared secret under PKE idiom
+    generates ss_a            // the KEM shared secret 'ss' chosen by initiator
+    kem_ct = PKE_ENC(G^pqspk_b, ss_a)   // ciphertext sent to B
+
+    // --- SK derivation (note 3): pairwise HKDF fold of {DH1..DH4, ss} +
+    //     identity binding via info = (G^ik_sign_a, G^ik_sign_b).
+    //     HKDF(salt, ikm, info) in Verifpal; we chain so SK depends on ALL inputs.
+    sk_a1 = HKDF(dh1_a, dh2_a, dh3_a)              // fold DH1,DH2,DH3
+    sk_a2 = HKDF(sk_a1, dh4_a, ss_a)               // fold in DH4 and KEM ss
+    sk_a  = HKDF(sk_a2, G^ik_sign_a, G^ik_sign_b)  // bind both identities (UKS)
+    // ABSTRACTION: real ikm is a single concat with 0xff^32 prefix and a fixed
+    // info string + i8 labels; Verifpal cannot model the byte layout. The
+    // ESSENTIAL property (SK = f(every secret, both identities)) is preserved.
+
+    // --- first SCKA epoch key k_1 (note 6): KDF_OK seeded by SK at epoch 1.
+    k1_a = HKDF(sk_a, sk_a, G^ik_sign_a)   // ABSTRACTION of HKDF(ikm=ss/SK,...":SCKA Key"||i8(1))
+    // TODO(human): the real KDF_OK keys on the KEM 'ss', then the authenticator
+    // is seeded by SK. We approximate "first epoch key derived from handshake
+    // secret". Confirm this matches your intended trust boundary for k_1.
+
+    // --- Double Ratchet (note 7): root seeded from SK, one step on k_1,
+    //     directional chain A->B, one message key.
+    rk_seed_a = HKDF(sk_a, k1_a, G^ik_sign_a)      // KDF_RK(rk=SK, k_e=k1) -> seed
+    ck_atob_a = HKDF(rk_seed_a, rk_seed_a, G^ik_dh_a)  // CK_{A->B} (info="A->B" abstracted)
+    mk_a = MAC(ck_atob_a, ck_atob_a)               // KDF_CK: mk = HMAC(ck, 0x01) (label abstracted)
+
+    // --- AEAD chat message (note 8) -----------------------------------------
+    knows private plaintext_m                      // the secret chat message
+    // AD binds direction (A->B identities) and header (epoch=1,index=0 abstracted).
+    ad_a = CONCAT(G^ik_sign_a, G^ik_sign_b)        // directional + identity AD
+    chat_ct = AEAD_ENC(mk_a, plaintext_m, ad_a)
+]
+
+// A -> B : the PQXDH InitialMessage + the first AEAD chat envelope.
+//  Fields (faithful to InitialMessage + chat envelope):
+//    ik_sign_pub_A, ik_dh_pub_A, ik_dh_sig_A, ek_pub_A, kem_ct, [opk used], chat_ct
+Alice -> Bob: [G^ik_sign_a], G^ik_dh_a,
+              ik_dh_sig_a_SENT,            // see Alice2 block: A signs its DH key
+              G^ek_a, kem_ct, ad_a, chat_ct
+
+// Alice must also produce her identity-binding signature (responder verifies it).
+// Declared in a small follow-up block so it is available to the message above.
+// (Verifpal evaluates a principal's block top-to-bottom; we add the signature
+//  here to keep the handshake block readable.)
+principal Alice[
+    ik_dh_sig_a_SENT = SIGN(ik_sign_a, G^ik_dh_a)   // binds A's X25519 DH key
+]
+// NOTE: in real Verifpal you would compute ik_dh_sig_a inside the first Alice
+// block before the message. This split is for COMMENT clarity; a human running
+// the model should MERGE it into the first block (move the SIGN up) so the
+// message can reference it. TODO(human): merge the two Alice blocks before run.
+
+// -----------------------------------------------------------------------------
+//  Principal B (responder side): verify A's identity binding, recompute SK, k_1,
+//  the (B-side) DR message key, and decrypt the chat message.
+// -----------------------------------------------------------------------------
+principal Bob[
+    // Authenticate initiator: A's X25519 DH key must be signed by A's identity.
+    _ = SIGNVERIF(G^ik_sign_a, G^ik_dh_a, ik_dh_sig_a_SENT)?
+
+    // Recompute the four DHs from B's private prekeys (mirrors responder_handshake):
+    dh1_b = G^ik_dh_a^spk_b    // DH1 = X25519(SPK_B, IK_dh_A)
+    dh2_b = G^ek_a^ik_dh_b     // DH2 = X25519(IK_dh_B, EK_A)
+    dh3_b = G^ek_a^spk_b       // DH3 = X25519(SPK_B,  EK_A)
+    dh4_b = G^ek_a^opk_b       // DH4 = X25519(OPK_B,  EK_A)
+
+    // Decapsulate the ML-KEM ciphertext to recover ss (note 2).
+    ss_b = PKE_DEC(pqspk_b, kem_ct)
+
+    // Recompute SK identically (note 3) — same fold, A then B identities.
+    sk_b1 = HKDF(dh1_b, dh2_b, dh3_b)
+    sk_b2 = HKDF(sk_b1, dh4_b, ss_b)
+    sk_b  = HKDF(sk_b2, G^ik_sign_a, G^ik_sign_b)
+
+    // Recompute first epoch key and DR message key (mirrors Alice).
+    k1_b = HKDF(sk_b, sk_b, G^ik_sign_a)
+    rk_seed_b = HKDF(sk_b, k1_b, G^ik_sign_a)
+    ck_atob_b = HKDF(rk_seed_b, rk_seed_b, G^ik_dh_a)
+    mk_b = MAC(ck_atob_b, ck_atob_b)
+
+    // Decrypt with the SAME AD; AEAD_DEC fails closed if AD/ct tampered.
+    ad_b = CONCAT(G^ik_sign_a, G^ik_sign_b)
+    recovered_m = AEAD_DEC(mk_b, chat_ct, ad_b)?
+]
+
+// =============================================================================
+//  QUERIES
+// -----------------------------------------------------------------------------
+//  Verifpal evaluates each query under the active attacker and reports HOLD/FAIL.
+// =============================================================================
+queries[
+    // --- (Q1) Confidentiality of the PQXDH shared secret SK -------------------
+    // SK must never be derivable by the attacker. If this fails, every downstream
+    // key is compromised. (Symbolic confidentiality only.)
+    confidentiality? sk_a
+    confidentiality? sk_b
+
+    // --- (Q2) Confidentiality of the first SCKA epoch key k_1 -----------------
+    confidentiality? k1_a
+    confidentiality? k1_b
+
+    // --- (Q3) Confidentiality of the chat message ----------------------------
+    // The plaintext chat message must remain secret from the network attacker.
+    confidentiality? plaintext_m
+
+    // --- (Q4) Authentication of the chat message  (message? Alice -> Bob) ------
+    // If Bob completes AEAD_DEC of chat_ct (guarded by ?), Verifpal proves the
+    // message Bob accepted as chat_ct was genuinely the one Alice produced —
+    // i.e. no injected/forged ciphertext is accepted. This is Verifpal's
+    // sender-authentication / message-integrity query.
+    authentication? Alice -> Bob: chat_ct
+
+    // Also authenticate the handshake-critical KEM ciphertext and the
+    // identity-binding signature path (so a swapped kem_ct / ek_a is caught).
+    authentication? Alice -> Bob: kem_ct
+    authentication? Alice -> Bob: ik_dh_sig_a_SENT
+
+    // --- (Q5) Freshness / UKS / identity-misbinding --------------------------
+    // freshness? checks ek_a is fresh (not replayable) — relevant to OPK/EK
+    // freshness; a FAIL here would indicate a replayable handshake value.
+    freshness? ek_a
+
+    // Unknown-Key-Share: the SK binds both identity signing keys via the HKDF
+    // info fold. We test that Bob's view of who-he-talked-to (sk_b, derived with
+    // G^ik_sign_a) cannot be made to coincide with a session Alice ran toward a
+    // DIFFERENT identity. In Verifpal, the precondition[] form expresses
+    // "authentication holds only if a corresponding event occurred". Here we use
+    // the message-authentication of ik_dh_sig_a_SENT (above) PLUS the identity
+    // binding folded into SK to argue UKS resistance.
+    //
+    // TODO(human): Verifpal's strongest UKS check is a `precondition[]` block or
+    // a second Alice principal addressing a different Bob; add it to make UKS
+    // explicit. The current queries test the NECESSARY conditions (SK secrecy +
+    // chat authentication + DH-key signature authentication) but a dedicated
+    // two-session UKS scenario should be added before claiming UKS resistance.
+    freshness? ss_a
+]
+
+// =============================================================================
+//  OPEN TODOs FOR A HUMAN (summary)
+//  [ ] Merge the two `principal Alice[...]` blocks (move ik_dh_sig_a_SENT into the
+//      first block) so the model parses; the split here is purely for comments.
+//  [ ] Run `verifpal verify mlkem_braid.vp` and record the ACTUAL per-query
+//      results — do NOT trust the "clean result" description above until run.
+//  [ ] Review the HKDF folds (notes 3,6,7): confirm each preserves the
+//      "depends on every secret" property and that label strings, which Verifpal
+//      cannot check, are audited against code separately.
+//  [ ] Add an explicit two-session UKS scenario (second Bob' / precondition[]).
+//  [ ] Add a replay `phase 1` re-sending InitialMessage to document (not prove)
+//      that OPK single-use is OUT of Verifpal's scope.
+//  [ ] Confirm guarded-constant [..] choices match the signatures actually
+//      verified in code (pqxdh.py bundle.verify / responder_handshake).
+//  [ ] Cross-check that everything Verifpal CANNOT prove (FS/PCS across epochs,
+//      SCKA machine, incremental-KEM lemma, computational PQ) is covered by the
+//      Tamarin / TLA+ / EasyCrypt artifacts per docs/PROTOCOL_SPEC.md §A.
+// =============================================================================

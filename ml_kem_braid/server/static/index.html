@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BraidLink</title>
+    <link rel="icon" href="/ui/logo.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/ui/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar" aria-label="BraidLink mobile header">
+        <div class="topbar-row">
+          <a class="brand-lockup" href="/ui" aria-label="BraidLink">
+            <img class="logo" src="/ui/logo.svg" alt="" />
+            <span>BraidLink</span>
+          </a>
+          <span class="topbar-device" id="mobile-device-summary">Not registered</span>
+        </div>
+        <nav class="mobile-nav" aria-label="Mobile workspace">
+          <button class="mobile-nav-button" type="button" id="mobile-nav-contacts">Contacts</button>
+          <button class="mobile-nav-button" type="button" id="mobile-nav-chat">Chat</button>
+          <button class="mobile-nav-button" type="button" id="mobile-nav-device">Device</button>
+        </nav>
+      </header>
+
+      <aside class="side-rail" aria-label="BraidLink navigation">
+        <a class="brand-lockup rail-brand" href="/ui" aria-label="BraidLink">
+          <img class="logo" src="/ui/logo.svg" alt="" />
+          <span>BraidLink</span>
+        </a>
+
+        <section class="device-summary" aria-labelledby="device-summary-title">
+          <p class="eyebrow" id="device-summary-title">Local device</p>
+          <p class="device-name" id="rail-username">Not registered</p>
+          <p class="device-id" id="rail-device-id">No device token</p>
+        </section>
+
+        <nav class="rail-nav" aria-label="Workspace">
+          <a class="rail-link" id="nav-contacts" href="#contacts-panel">Contacts</a>
+          <a class="rail-link" id="nav-chat" href="#chat-panel">Chat</a>
+          <a class="rail-link is-active" id="nav-device" href="#registration-panel">Device</a>
+        </nav>
+      </aside>
+
+      <main class="workspace" aria-labelledby="workspace-title">
+        <section class="workspace-heading" aria-labelledby="workspace-title">
+          <p class="eyebrow">Workspace</p>
+          <h1 id="workspace-title">Contacts</h1>
+        </section>
+
+        <section class="panel registration-panel" id="registration-panel" aria-labelledby="registration-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Device</p>
+              <h2 id="registration-title">Registration</h2>
+            </div>
+            <button class="secondary-button" type="button" id="clear-session-button">Clear</button>
+          </div>
+
+          <form class="form-grid" id="register-form">
+            <label for="register-username">Username</label>
+            <div class="inline-controls">
+              <input
+                id="register-username"
+                name="username"
+                type="text"
+                autocomplete="username"
+                placeholder="Alice.42"
+                required
+              />
+              <button class="primary-button" type="submit">Register</button>
+            </div>
+          </form>
+          <p class="utility-note">
+            Demo registration requires local mode:
+            <code>BRAID_ENABLE_DEMO_UI=1</code>.
+          </p>
+
+          <div class="session-strip" id="session-strip" hidden>
+            <div class="session-copy">
+              <span class="session-label">Signed in</span>
+              <strong id="session-username">Unknown</strong>
+            </div>
+            <span class="token-chip" id="session-device">Device -</span>
+          </div>
+
+          <p class="status-line" id="register-status" role="status" aria-live="polite"></p>
+        </section>
+
+        <section class="panel contacts-panel is-hidden" id="contacts-panel" aria-labelledby="contacts-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Exact lookup</p>
+              <h2 id="contacts-title">Contact book</h2>
+            </div>
+            <button class="secondary-button" type="button" id="refresh-contacts-button">Refresh</button>
+          </div>
+
+          <form class="form-grid search-form" id="search-form">
+            <label for="search-username">Username</label>
+            <div class="inline-controls">
+              <input
+                id="search-username"
+                name="username"
+                type="text"
+                autocomplete="off"
+                placeholder="Bob.1042"
+                required
+              />
+              <button class="primary-button" type="submit">Search</button>
+            </div>
+          </form>
+
+          <div class="lookup-result" id="lookup-result" aria-live="polite"></div>
+
+          <div class="list-heading">
+            <h3>Requests</h3>
+            <span id="request-count">0</span>
+          </div>
+          <div class="request-list" id="request-list" role="list"></div>
+
+          <div class="list-heading">
+            <h3>Contacts</h3>
+            <span id="contact-count">0</span>
+          </div>
+          <div class="contact-list" id="contact-list" role="list"></div>
+        </section>
+
+        <section class="panel chat-panel is-hidden" id="chat-panel" aria-labelledby="chat-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Messages</p>
+              <h2 id="chat-title">Chat</h2>
+            </div>
+          </div>
+
+          <div class="chat-layout">
+            <div class="chat-contact-pane" aria-labelledby="chat-contact-title">
+              <div class="list-heading">
+                <h3 id="chat-contact-title">Contacts</h3>
+                <span id="chat-contact-count">0</span>
+              </div>
+              <div class="chat-contact-list" id="chat-contact-list" role="list"></div>
+            </div>
+
+            <div class="chat-thread-panel" aria-labelledby="chat-thread-title">
+              <div class="chat-thread-heading">
+                <div>
+                  <p class="eyebrow">Conversation</p>
+                  <h3 id="chat-thread-title">No contact selected</h3>
+                </div>
+              </div>
+              <div class="chat-thread" id="chat-thread" role="log" aria-live="polite"></div>
+              <form class="chat-composer" id="chat-composer">
+                <input
+                  id="chat-message-input"
+                  name="message"
+                  type="text"
+                  autocomplete="off"
+                  placeholder="Select a contact"
+                  disabled
+                />
+                <button class="primary-button" type="submit" id="chat-send-button" disabled>Send</button>
+              </form>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <aside class="inspector" id="contact-inspector" aria-labelledby="inspector-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Selected</p>
+            <h2 id="inspector-title">Contact</h2>
+          </div>
+        </div>
+
+        <div class="inspector-body" id="inspector-body">
+          <p class="empty-state">No contact selected</p>
+        </div>
+
+        <div class="inspector-actions">
+          <button class="primary-button" type="button" id="start-chat-button" disabled>Start chat</button>
+          <button class="danger-button" type="button" id="delete-contact-button" disabled>Remove</button>
+        </div>
+      </aside>
+    </div>
+
+    <script src="/ui/app.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,120 @@
+{
+  "repo_root": "/home/supasuge/Documents/Projects/KEM-Braid_VPN",
+  "package_root": "/home/supasuge/Documents/Projects/KEM-Braid_VPN/ml_kem_braid",
+  "passed": 10,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "PQXDH uses ML-KEM-1024 and identity-bound HKDF info",
+      "ok": true,
+      "evidence": [
+        "README.md:48: | PQXDH handshake | X25519 \u00d74 DH + ML-KEM-1024 KEM \u2192 32-byte `SK` via HKDF (`F\u2016DH1\u2016DH2\u2016DH3\u2016DH4\u2016SS`, info=`PQXDH_INFO\u2016IK_A\u2016IK_B`). Signed prekey bundles (Ed25519). Identity-binding signature on the initiator's DH key (`ik_dh_sig`). One-time prekey consumed on use; replay raises `KeyError`. |",
+        "README.md:625: | **Authenticated handshake** | PQXDH bundle signatures (Ed25519) and `ik_dh_sig` binding \u2014 both the responder's prekey bundle and the initiator's DH key are signed by the respective Ed25519 identity keys. `SK` binds both identity public keys via the HKDF `info` field, defeating unknown-key-share attacks. |",
+        "ml_kem_braid/pqxdh/pqxdh.py:56: PQXDH_KEM = ML_KEM_1024",
+        "ml_kem_braid/pqxdh/pqxdh.py:226: info = PQXDH_INFO + ik_a_sign + ik_b_sign"
+      ],
+      "detail": ""
+    },
+    {
+      "name": "Responder verifies initiator DH identity binding",
+      "ok": true,
+      "evidence": [
+        "ml_kem_braid/pqxdh/pqxdh.py:283: message.ik_dh_sig, message.ik_dh_pub",
+        "tests/test_security_fixes.py:29: def test_responder_rejects_unbound_initiator_dh_key():"
+      ],
+      "detail": ""
+    },
+    {
+      "name": "One-time prekey replay prevention is implemented and tested",
+      "ok": true,
+      "evidence": [
+        "README.md:628: | **OPK replay prevention** | One-time prekeys are deleted on use (`del secrets.opk_priv[opk_id]`); a replayed `InitialMessage` with a consumed OPK raises `KeyError`. |",
+        "ml_kem_braid/pqxdh/pqxdh.py:307: del secrets.opk_priv[message.opk_id]  # one-time: consume on use",
+        "tests/test_security_fixes.py:57: def test_one_time_prekey_consumed_blocks_replay():"
+      ],
+      "detail": ""
+    },
+    {
+      "name": "SCKA KDF labels match the README/spec claims",
+      "ok": true,
+      "evidence": [
+        "ml_kem_braid/core/kdf.py:108: def __init__(self, protocol_info: str = \"MLKEMBraid_MLKEM768_HMAC-SHA256\"):",
+        "ml_kem_braid/core/kdf.py:148: info = self.protocol_info + b\":Authenticator Update\" + epoch_to_bytes(epoch)",
+        "ml_kem_braid/core/kdf.py:184: info = self.protocol_info + b\":SCKA Key\" + epoch_to_bytes(epoch)",
+        "ml_kem_braid/core/authenticator.py:188: b\":ekheader\" +",
+        "ml_kem_braid/core/authenticator.py:155: self.protocol_info + b\":ciphertext\" + epoch_to_bytes(epoch) + ciphertext"
+      ],
+      "detail": ""
+    },
+    {
+      "name": "SCKA ciphertext authentication is transactional",
+      "ok": true,
+      "evidence": [
+        "ml_kem_braid/core/authenticator.py:153: cand_root, cand_mac = self.kdf.kdf_auth(self.state.root_key, key, epoch)",
+        "ml_kem_braid/core/authenticator.py:158: if not hmac.compare_digest(computed, expected_mac):",
+        "ml_kem_braid/core/authenticator.py:162: self.state.root_key = cand_root",
+        "tests/test_security_fixes.py:69: def test_failed_ciphertext_mac_does_not_mutate_authenticator():"
+      ],
+      "detail": ""
+    },
+    {
+      "name": "Incremental Encaps1/Encaps2 split has a byte-equality regression test",
+      "ok": true,
+      "evidence": [
+        "README.md:84: `ct1 \u2016 ct2` is identical to what the monolithic `encaps` would have produced for the",
+        "ml_kem_braid/core/ml_kem.py:178: def encaps1(",
+        "ml_kem_braid/core/ml_kem.py:213: def encaps2(",
+        "ml_kem_braid/core/ml_kem.py:247: return self._impl._decaps_internal(dk, ct1 + ct2)",
+        "tests/test_kem.py:41: def test_split_equals_reference_monolithic(variant):",
+        "tests/test_kem.py:58: assert ct1 + ct2 == ref_c, \"incremental split diverges from FIPS-203 ciphertext\""
+      ],
+      "detail": "This is empirical coverage, not a universal EasyCrypt proof."
+    },
+    {
+      "name": "Double Ratchet direction separation, MAX_SKIP, and commit-after-AEAD are present",
+      "ok": true,
+      "evidence": [
+        "ml_kem_braid/core/double_ratchet.py:51: _INFO_ATOB = b\"A->B\"",
+        "ml_kem_braid/core/double_ratchet.py:52: _INFO_BTOA = b\"B->A\"",
+        "ml_kem_braid/core/double_ratchet.py:47: MAX_SKIP = 1000",
+        "ml_kem_braid/core/double_ratchet.py:239: plaintext = aead_decrypt(mk, ciphertext, full_ad)  # raises before eviction",
+        "ml_kem_braid/core/double_ratchet.py:282: self._ck_recv = ck_next",
+        "tests/test_double_ratchet.py:231: def test_forged_message_does_not_evict_cached_key(self):",
+        "tests/test_double_ratchet.py:10: cached (bounded by MAX_SKIP) then pruned when consumed."
+      ],
+      "detail": ""
+    },
+    {
+      "name": "Chat associated data binds sender, recipient, epoch, and index",
+      "ok": true,
+      "evidence": [
+        "ml_kem_braid/client/client.py:323: return f\"{s_user}:{s_dev}->{r_user}:{r_dev}\".encode(\"utf-8\")",
+        "ml_kem_braid/core/double_ratchet.py:306: b\"hdr:\"",
+        "ml_kem_braid/core/double_ratchet.py:307: + header.epoch.to_bytes(8, \"big\")",
+        "ml_kem_braid/core/double_ratchet.py:308: + header.index.to_bytes(8, \"big\")"
+      ],
+      "detail": ""
+    },
+    {
+      "name": "Relay sender identity and username pinning are enforced",
+      "ok": true,
+      "evidence": [
+        "ml_kem_braid/server/app.py:290: Ed25519PublicKey.from_public_bytes(ik_sign_pub).verify(",
+        "ml_kem_braid/server/app.py:340: sender_username=sender.username,",
+        "ml_kem_braid/sesame/store.py:114: elif account.identity_key != identity_key:",
+        "ml_kem_braid/sesame/sqlite_store.py:127: if existing_row is not None and bytes(existing_row[\"identity_key\"]) != identity_key:"
+      ],
+      "detail": ""
+    },
+    {
+      "name": "README caveats are preserved: no rate limiting and no completed formal proof",
+      "ok": true,
+      "evidence": [
+        "README.md:637: - **No rate limiting, DoS protection, or spam filtering.**",
+        "README.md:638: - **No formal audit.** This is a research/educational implementation. The protocol",
+        "docs/FORMAL_VERIFICATION.md:5: > **Nothing in this repository is \"verified\" or \"proven\" yet.** Every claim that a"
+      ],
+      "detail": ""
+    }
+  ]
+}

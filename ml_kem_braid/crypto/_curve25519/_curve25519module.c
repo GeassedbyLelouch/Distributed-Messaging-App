@@ -1,0 +1,62 @@
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+#include <bytesobject.h>
+#define Y "y"
+
+int curve25519_sign(unsigned char* signature_out, const unsigned char* curve25519_privkey,
+                    const unsigned char* msg, const unsigned long msg_len, const unsigned char* random);
+int curve25519_verify(const unsigned char* signature, const unsigned char* curve25519_pubkey,
+                      const unsigned char* msg, const unsigned long msg_len);
+int curve25519_donna(char *mypublic, const char *secret, const char *basepoint);
+
+static PyObject *calculateSignature(PyObject *self, PyObject *args) {
+    const char *random,*privatekey,*message; char signature[64];
+    Py_ssize_t randomlen,privatekeylen,messagelen;
+    if (!PyArg_ParseTuple(args, Y"#"Y"#"Y"#:sign",&random,&randomlen,&privatekey,&privatekeylen,&message,&messagelen)) return NULL;
+    if (privatekeylen!=32){PyErr_SetString(PyExc_ValueError,"private key must be 32-byte string");return NULL;}
+    if (randomlen!=64){PyErr_SetString(PyExc_ValueError,"random must be 64-byte string");return NULL;}
+    curve25519_sign((unsigned char*)signature,(unsigned char*)privatekey,(unsigned char*)message,(unsigned long)messagelen,(unsigned char*)random);
+    return PyBytes_FromStringAndSize(signature,64);
+}
+static PyObject *verifySignature(PyObject *self, PyObject *args) {
+    const char *publickey,*message,*signature; Py_ssize_t publickeylen,messagelen,signaturelen;
+    if (!PyArg_ParseTuple(args, Y"#"Y"#"Y"#:verify",&publickey,&publickeylen,&message,&messagelen,&signature,&signaturelen)) return NULL;
+    if (publickeylen!=32){PyErr_SetString(PyExc_ValueError,"publickey must be 32-byte string");return NULL;}
+    if (signaturelen!=64){PyErr_SetString(PyExc_ValueError,"signature must be 64-byte string");return NULL;}
+    int result=curve25519_verify((unsigned char*)signature,(unsigned char*)publickey,(unsigned char*)message,(unsigned long)messagelen);
+    return Py_BuildValue("i",result);
+}
+static PyObject *generatePrivateKey(PyObject *self, PyObject *args) {
+    char *random; Py_ssize_t randomlen;
+    if(!PyArg_ParseTuple(args, Y"#:clamp",&random,&randomlen)) return NULL;
+    if(randomlen!=32){PyErr_SetString(PyExc_ValueError,"random must be 32-byte string");return NULL;}
+    random[0]&=248; random[31]&=127; random[31]|=64;
+    return PyBytes_FromStringAndSize(random,32);
+}
+static PyObject *generatePublicKey(PyObject *self, PyObject *args) {
+    const char *private; char mypublic[32]; char basepoint[32]={9}; Py_ssize_t privatelen;
+    if (!PyArg_ParseTuple(args, Y"#:makepublic",&private,&privatelen)) return NULL;
+    if (privatelen!=32){PyErr_SetString(PyExc_ValueError,"input must be 32-byte string");return NULL;}
+    curve25519_donna(mypublic,private,basepoint);
+    return PyBytes_FromStringAndSize(mypublic,32);
+}
+static PyObject *calculateAgreement(PyObject *self, PyObject *args) {
+    const char *myprivate,*theirpublic; char shared_key[32]; Py_ssize_t myprivatelen,theirpubliclen;
+    if (!PyArg_ParseTuple(args, Y"#"Y"#:agree",&myprivate,&myprivatelen,&theirpublic,&theirpubliclen)) return NULL;
+    if (myprivatelen!=32||theirpubliclen!=32){PyErr_SetString(PyExc_ValueError,"input must be 32-byte string");return NULL;}
+    curve25519_donna(shared_key,myprivate,theirpublic);
+    return PyBytes_FromStringAndSize(shared_key,32);
+}
+
+static PyMethodDef curve25519_functions[] = {
+    {"calculateSignature",calculateSignature,METH_VARARGS,"random+privatekey+message->signature"},
+    {"verifySignature",verifySignature,METH_VARARGS,"publickey+message+signature->0 if valid"},
+    {"generatePrivateKey",generatePrivateKey,METH_VARARGS,"data->private"},
+    {"generatePublicKey",generatePublicKey,METH_VARARGS,"private->public"},
+    {"calculateAgreement",calculateAgreement,METH_VARARGS,"private+public->shared"},
+    {NULL,NULL,0,NULL},
+};
+static struct PyModuleDef curve25519_module = {
+    PyModuleDef_HEAD_INIT,"_curve25519",NULL,-1,curve25519_functions,
+};
+PyMODINIT_FUNC PyInit__curve25519(void){ return PyModule_Create(&curve25519_module); }

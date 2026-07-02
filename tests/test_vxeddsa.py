@@ -1,5 +1,5 @@
 import os
-from ml_kem_braid.crypto import backend
+from ml_kem_braid.crypto import backend, vxeddsa, xeddsa
 
 LABEL = b"test-label"
 
@@ -23,8 +23,6 @@ def test_vrf_rejects_tamper_and_wrong_label():
     assert c.verifyVrfSignature(pub, b"msg", proof, b"other") is None
     bad = bytes(b ^ 0xFF for b in proof[:1]) + proof[1:]
     assert c.verifyVrfSignature(pub, b"msg", bad, LABEL) is None
-
-from ml_kem_braid.crypto import vxeddsa, xeddsa
 
 def test_seam_roundtrip_and_output_binding():
     priv = xeddsa.generate_identity(); pub = xeddsa.public_key(priv)

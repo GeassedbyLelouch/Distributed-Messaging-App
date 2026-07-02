@@ -469,6 +469,19 @@ polling, use `GET /messages`.
 
 ---
 
+## Building the XEdDSA/VXEdDSA extension
+
+The identity signatures use a vendored, constant-time Signal curve25519 C core.
+Build it once (requires a C compiler):
+
+    uv run python build_curve25519.py build_ext --inplace
+
+XEdDSA (`ml_kem_braid.crypto.xeddsa`) is constant-time C. VXEdDSA
+(`ml_kem_braid.crypto.vxeddsa`) is a general labeled VRF primitive. See
+`NOTICE` for the GPLv3 licensing caveat of the vendored C.
+
+---
+
 ## 6. Setup and usage
 
 ### Install

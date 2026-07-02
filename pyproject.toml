@@ -31,12 +31,17 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "mypy>=1.8.0",
+    # Required to build the vendored curve25519 C extension (build_curve25519.py).
+    "setuptools>=68",
 ]
 
 [project.scripts]
 braid-server = "ml_kem_braid.server.app:main"
 braid-testnet = "ml_kem_braid.testnet.demo:main"
 
+# NOTE: The XEdDSA/VXEdDSA C extension is NOT built by hatchling automatically.
+# Run `uv run python build_curve25519.py build_ext --inplace` once (needs a C compiler).
+# Packaging the compiled .so via hatchling is a follow-up; the C is vendored.
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -47,3 +52,8 @@ packages = ["ml_kem_braid"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "setuptools>=82.0.1",
+]

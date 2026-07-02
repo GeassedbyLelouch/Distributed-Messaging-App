@@ -21,5 +21,6 @@ def test_protocol_spec_mentions_signed_records_and_opk_leases():
 
 
 def test_decentralized_formal_model_scaffolds_exist():
-    assert Path("ml_kem_braid/codex-proofs/models/tamarin/signed_contact_events.spthy").exists()
-    assert Path("ml_kem_braid/codex-proofs/models/tla/OPKLease.tla").exists()
+    # codex-proofs was moved to repo root (from ml_kem_braid/codex-proofs/).
+    assert Path("codex-proofs/models/tamarin/signed_contact_events.spthy").exists()
+    assert Path("codex-proofs/models/tla/OPKLease.tla").exists()

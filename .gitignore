@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 docs/superpowers/
 .claude
+ml_kem_braid/crypto/_curve25519*.so

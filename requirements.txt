@@ -24,3 +24,8 @@ pydantic>=2.6.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 mypy>=1.8.0
+
+# Build tool for the vendored curve25519 C extension.
+setuptools>=68
+# XEdDSA/VXEdDSA use a vendored Signal curve25519 C extension built via
+# `uv run python build_curve25519.py build_ext --inplace` (needs a C compiler).

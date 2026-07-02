@@ -2,21 +2,18 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+from ml_kem_braid.crypto import xeddsa
 from ml_kem_braid.decentralized.records import SignedRecord, sign_record
 from ml_kem_braid.decentralized.services import DecentralizedServices
 from ml_kem_braid.server.app import create_app
 
 
-def _signing_keys() -> tuple[Ed25519PrivateKey, bytes]:
-    key = Ed25519PrivateKey.generate()
-    public_key = key.public_key().public_bytes(
-        encoding=Encoding.Raw,
-        format=PublicFormat.Raw,
-    )
-    return key, public_key
+def _signing_keys() -> tuple[bytes, bytes]:
+    """Return (private_key_bytes, public_key_bytes) using XEdDSA (Curve25519)."""
+    priv = xeddsa.generate_identity()
+    pub = xeddsa.public_key(priv)
+    return priv, pub
 
 
 def _signed_record(
@@ -241,8 +238,8 @@ def test_mutating_drained_returned_envelope_does_not_repopulate_mailbox() -> Non
 
 def test_decentralized_router_can_publish_and_lookup_record():
     client = _enabled_client()
-    key = Ed25519PrivateKey.generate()
-    pub = key.public_key().public_bytes_raw()
+    key = xeddsa.generate_identity()
+    pub = xeddsa.public_key(key)
     record = sign_record(
         record_type="identity.username_record",
         author_identity=pub,

@@ -53,7 +53,3 @@ packages = ["ml_kem_braid"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 
-[dependency-groups]
-dev = [
-    "setuptools>=82.0.1",
-]

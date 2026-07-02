@@ -27,7 +27,7 @@ def b64d(text: str) -> bytes:
 def registration_challenge(username: str, registration_id: int) -> bytes:
     """Canonical message a client signs with its identity key to prove ownership
     of the username it registers (verified server-side against the bundle's
-    ``ik_sign_pub``)."""
+    ``ik_pub``)."""
     return f"MLKEMBraid-register:{username}:{registration_id}".encode("utf-8")
 
 
@@ -36,9 +36,7 @@ def registration_challenge(username: str, registration_id: int) -> bytes:
 
 def bundle_to_dict(bundle: PreKeyBundle) -> dict:
     return {
-        "ik_sign_pub": b64e(bundle.ik_sign_pub),
-        "ik_dh_pub": b64e(bundle.ik_dh_pub),
-        "ik_dh_sig": b64e(bundle.ik_dh_sig),
+        "ik_pub": b64e(bundle.ik_pub),
         "spk_id": bundle.spk_id,
         "spk_pub": b64e(bundle.spk_pub),
         "spk_sig": b64e(bundle.spk_sig),
@@ -53,9 +51,7 @@ def bundle_to_dict(bundle: PreKeyBundle) -> dict:
 def bundle_from_dict(data: dict) -> PreKeyBundle:
     opk_pub = data.get("opk_pub")
     return PreKeyBundle(
-        ik_sign_pub=b64d(data["ik_sign_pub"]),
-        ik_dh_pub=b64d(data["ik_dh_pub"]),
-        ik_dh_sig=b64d(data["ik_dh_sig"]),
+        ik_pub=b64d(data["ik_pub"]),
         spk_id=int(data["spk_id"]),
         spk_pub=b64d(data["spk_pub"]),
         spk_sig=b64d(data["spk_sig"]),
@@ -72,9 +68,7 @@ def bundle_from_dict(data: dict) -> PreKeyBundle:
 
 def initial_message_to_dict(msg: InitialMessage) -> dict:
     return {
-        "ik_sign_pub": b64e(msg.ik_sign_pub),
-        "ik_dh_pub": b64e(msg.ik_dh_pub),
-        "ik_dh_sig": b64e(msg.ik_dh_sig),
+        "ik_pub": b64e(msg.ik_pub),
         "ek_pub": b64e(msg.ek_pub),
         "spk_id": msg.spk_id,
         "pqspk_id": msg.pqspk_id,
@@ -85,9 +79,7 @@ def initial_message_to_dict(msg: InitialMessage) -> dict:
 
 def initial_message_from_dict(data: dict) -> InitialMessage:
     return InitialMessage(
-        ik_sign_pub=b64d(data["ik_sign_pub"]),
-        ik_dh_pub=b64d(data["ik_dh_pub"]),
-        ik_dh_sig=b64d(data["ik_dh_sig"]),
+        ik_pub=b64d(data["ik_pub"]),
         ek_pub=b64d(data["ek_pub"]),
         spk_id=int(data["spk_id"]),
         pqspk_id=int(data["pqspk_id"]),

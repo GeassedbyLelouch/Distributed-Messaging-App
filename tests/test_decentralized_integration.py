@@ -14,7 +14,7 @@ def test_cross_relay_delivery_preserves_opaque_message_body() -> None:
     relay_a.add_peer(relay_b)
     envelope = {
         "kind": "pqxdh_init",
-        "body": {"kem_ct": "opaque", "ik_sign_pub": "public"},
+        "body": {"kem_ct": "opaque", "ik_pub": "public"},
     }
 
     relay_a.forward_to_relay(

@@ -35,7 +35,8 @@ def verify(pub: bytes, msg: bytes, sig: bytes) -> bool:
     """True iff `sig` is a valid XEdDSA signature by `pub` over `msg`."""
     if len(sig) != SIGNATURE_SIZE or len(pub) != KEY_SIZE:
         return False
+    lib = backend.load()
     try:
-        return backend.load().verifySignature(pub, msg, sig) == 0
+        return lib.verifySignature(pub, msg, sig) == 0
     except ValueError:
         return False

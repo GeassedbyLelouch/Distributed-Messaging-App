@@ -42,3 +42,20 @@ def test_seam_different_keys_differ_and_bad_verify_none():
     assert o1 != o2
     proof, _ = vxeddsa.vrf_sign(p1, b"m")
     assert vxeddsa.vrf_verify(xeddsa.public_key(p2), b"m", proof) is None
+
+
+# ---------------------------------------------------------------------------
+# C7 — VXEdDSA cofactor / neutral-point rejection
+# ---------------------------------------------------------------------------
+
+def test_vrf_verify_rejects_neutral_v_point():
+    """A proof whose first 32 bytes encode the neutral point (y=1, sign=0)
+    must be rejected regardless of the trailing bytes."""
+    priv = xeddsa.generate_identity()
+    pub = xeddsa.public_key(priv)
+    msg = b"neutral-point-test"
+    real_proof, _ = vxeddsa.vrf_sign(priv, msg)
+    # Neutral point on Ed25519: y=1 with sign bit 0 → little-endian 0x01 followed by 0x00*31
+    neutral_v = b"\x01" + b"\x00" * 31
+    crafted = neutral_v + real_proof[32:]
+    assert vxeddsa.vrf_verify(pub, msg, crafted) is None

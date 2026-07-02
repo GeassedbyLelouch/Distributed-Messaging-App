@@ -1,3 +1,10 @@
+"""Tests for the XEdDSA signing seam (ml_kem_braid.crypto.xeddsa).
+
+KAT vectors below are SELF-GENERATED regression locks: they guard the vendored
+build/encoding pipeline, NOT external Signal-interop compatibility. Do not
+compare them against the upstream python-axolotl-curve25519 test vectors
+without first confirming identical clamping and nonce-packing conventions.
+"""
 import os
 from ml_kem_braid.crypto import backend
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
@@ -44,3 +51,62 @@ def test_dh_matches_cryptography_x25519():
 def test_verify_rejects_bad_lengths():
     pub = xeddsa.public_key(xeddsa.generate_identity())
     assert not xeddsa.verify(pub, b"m", b"\x00" * 10)
+
+
+# ---------------------------------------------------------------------------
+# C5 — KAT / deterministic regression lock
+# ---------------------------------------------------------------------------
+# Vector derived from: priv = generatePrivateKey(bytes(range(32))),
+# nonce = bytes(64), msg = b"MLKEMBraid KAT vector".
+# Regenerate with:
+#   uv run python -c "
+#     from ml_kem_braid.crypto import backend, xeddsa
+#     priv = backend.load().generatePrivateKey(bytes(range(32)))
+#     sig = xeddsa.sign(priv, b'MLKEMBraid KAT vector', nonce=bytes(64))
+#     print(sig.hex())
+#   "
+_KAT_PRIV = backend.load().generatePrivateKey(bytes(range(32)))
+_KAT_PUB  = xeddsa.public_key(_KAT_PRIV)
+_KAT_MSG  = b"MLKEMBraid KAT vector"
+_KAT_NONCE = bytes(64)
+_KAT_SIG_HEX = (
+    "bd5fd4567317b2b145f49c13ea7abbab40955b31c658c38a4550cfe338fa76c2"
+    "8cf09de82346ae3bda599ad4874153d65fb279589494118c2039e1ce70248008"
+)
+
+def test_kat_determinism():
+    """Deterministic signature must match the locked vector."""
+    sig = xeddsa.sign(_KAT_PRIV, _KAT_MSG, nonce=_KAT_NONCE)
+    assert sig.hex() == _KAT_SIG_HEX
+
+def test_kat_verify():
+    """Locked KAT vector must verify against the corresponding public key."""
+    sig = bytes.fromhex(_KAT_SIG_HEX)
+    assert xeddsa.verify(_KAT_PUB, _KAT_MSG, sig) is True
+
+def test_kat_one_byte_flip_fails():
+    """Single-byte flip anywhere in the KAT signature must fail verification."""
+    sig = bytearray(bytes.fromhex(_KAT_SIG_HEX))
+    sig[0] ^= 0x01
+    assert xeddsa.verify(_KAT_PUB, _KAT_MSG, bytes(sig)) is False
+
+
+# ---------------------------------------------------------------------------
+# C6 — range / canonicity rejection
+# ---------------------------------------------------------------------------
+
+def test_verify_rejects_u_ge_p():
+    """Public key u >= p (all-0xFF) must be rejected."""
+    sig = bytes.fromhex(_KAT_SIG_HEX)
+    assert xeddsa.verify(b"\xff" * 32, _KAT_MSG, sig) is False
+
+def test_verify_rejects_s_out_of_range():
+    """Signature with last 32 bytes replaced by 0xFF (s out of range) must fail."""
+    sig = bytes.fromhex(_KAT_SIG_HEX)
+    bad_sig = sig[:32] + b"\xff" * 32
+    assert xeddsa.verify(_KAT_PUB, _KAT_MSG, bad_sig) is False
+
+def test_verify_rejects_neutral_public_key():
+    """Neutral / low-order public key (all-zero u-coordinate) must be rejected."""
+    sig = bytes.fromhex(_KAT_SIG_HEX)
+    assert xeddsa.verify(b"\x00" * 32, _KAT_MSG, sig) is False

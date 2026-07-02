@@ -1,4 +1,4 @@
 ml_kem_braid/crypto/_curve25519/curve/ contains Signal's curve25519 reference C
 (from python-axolotl-curve25519), licensed GPLv3. This imposes GPLv3 obligations
 on distributions that include the compiled extension. Resolve the GPLv3-vs-MIT
-question (relicense, isolate, or replace the backend) before public release.
+question (relicense, isolate, or replace the backend) before merging this branch or distributing any build that includes the compiled extension.

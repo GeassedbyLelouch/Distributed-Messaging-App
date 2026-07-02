@@ -1,6 +1,7 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <bytesobject.h>
+#include <string.h>
 #define Y "y"
 
 int curve25519_sign(unsigned char* signature_out, const unsigned char* curve25519_privkey,
@@ -23,7 +24,9 @@ static PyObject *calculateSignature(PyObject *self, PyObject *args) {
     if (!PyArg_ParseTuple(args, Y"#"Y"#"Y"#:sign",&random,&randomlen,&privatekey,&privatekeylen,&message,&messagelen)) return NULL;
     if (privatekeylen!=32){PyErr_SetString(PyExc_ValueError,"private key must be 32-byte string");return NULL;}
     if (randomlen!=64){PyErr_SetString(PyExc_ValueError,"random must be 64-byte string");return NULL;}
-    curve25519_sign((unsigned char*)signature,(unsigned char*)privatekey,(unsigned char*)message,(unsigned long)messagelen,(unsigned char*)random);
+    if (curve25519_sign((unsigned char*)signature,(unsigned char*)privatekey,(unsigned char*)message,(unsigned long)messagelen,(unsigned char*)random) != 0) {
+        PyErr_SetString(PyExc_ValueError, "signing failed"); return NULL;
+    }
     return PyBytes_FromStringAndSize(signature,64);
 }
 static PyObject *verifySignature(PyObject *self, PyObject *args) {
@@ -35,11 +38,13 @@ static PyObject *verifySignature(PyObject *self, PyObject *args) {
     return Py_BuildValue("i",result);
 }
 static PyObject *generatePrivateKey(PyObject *self, PyObject *args) {
-    char *random; Py_ssize_t randomlen;
+    const char *random; Py_ssize_t randomlen;
     if(!PyArg_ParseTuple(args, Y"#:clamp",&random,&randomlen)) return NULL;
     if(randomlen!=32){PyErr_SetString(PyExc_ValueError,"random must be 32-byte string");return NULL;}
-    random[0]&=248; random[31]&=127; random[31]|=64;
-    return PyBytes_FromStringAndSize(random,32);
+    char buf[32];
+    memcpy(buf, random, 32);
+    buf[0]&=248; buf[31]&=127; buf[31]|=64;
+    return PyBytes_FromStringAndSize(buf, 32);
 }
 static PyObject *generatePublicKey(PyObject *self, PyObject *args) {
     const char *private; char mypublic[32]; char basepoint[32]={9}; Py_ssize_t privatelen;

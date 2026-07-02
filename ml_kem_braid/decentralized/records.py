@@ -160,7 +160,7 @@ def sign_record(
     author_device_id: int,
     sequence: int,
     body: dict[str, Any],
-    signing_key: bytes,           # 32-byte Curve25519 private key
+    signing_key: bytes,           # 32-byte clamped Curve25519 private key
     created_at: float,
     expires_at: Optional[float] = None,
     version: int = 1,

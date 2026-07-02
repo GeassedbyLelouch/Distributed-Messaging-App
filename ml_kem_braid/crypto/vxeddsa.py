@@ -33,7 +33,12 @@ def vrf_verify(
     """Return the 32-byte VRF output if `proof` is valid, else None."""
     if len(proof) != PROOF_SIZE or len(pub) != xeddsa.KEY_SIZE:
         return None
+    lib = backend.load()
     try:
-        return backend.load().verifyVrfSignature(pub, msg, proof, label)
+        result = lib.verifyVrfSignature(pub, msg, proof, label)
     except ValueError:
         return None
+    if result is None:
+        return None
+    assert len(result) == OUTPUT_SIZE
+    return result

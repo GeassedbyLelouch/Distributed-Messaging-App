@@ -488,6 +488,7 @@ XEdDSA (`ml_kem_braid.crypto.xeddsa`) is constant-time C. VXEdDSA
 
 ```bash
 uv sync --extra dev
+uv run python build_curve25519.py build_ext --inplace
 ```
 
 ### Run the testnet (in-process, no server required)

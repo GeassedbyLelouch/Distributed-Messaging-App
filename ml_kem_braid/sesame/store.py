@@ -34,7 +34,7 @@ class Account:
     """A user account, keyed by username (the only required identifier)."""
 
     username: str
-    # Ed25519 identity public key the username is pinned to (trust-on-first-use).
+    # Curve25519 (Montgomery u-coordinate) identity public key the username is pinned to (trust-on-first-use).
     # Subsequent registrations must prove possession of this key.
     identity_key: bytes = b""
     created_at: float = field(default_factory=_now)

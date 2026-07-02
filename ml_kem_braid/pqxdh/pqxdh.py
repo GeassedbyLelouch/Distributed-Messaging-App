@@ -3,23 +3,22 @@ PQXDH initial key agreement (Signal PQXDH spec).
 
 Construction
 -----------
-Each identity owns an Ed25519 *signing* key and an X25519 *DH* key. (Signal uses
-one Montgomery key for both via XEdDSA; to avoid hand-rolling XEdDSA we use a
-dedicated Ed25519 key for signatures and bind the X25519 identity key to it with
-a signature. This is a standard, clearly-documented deviation.)
+The identity key is a single Curve25519 key used for both DH and XEdDSA signing
+(Signal's construction). Per the PQXDH spec, reuse of IK for DH and signing is
+intentionally not separately modeled.
 
 A published :class:`PreKeyBundle` contains, all signed by the identity:
-  * ``ik_sign_pub`` / ``ik_dh_pub`` — identity signing + DH public keys
-  * ``spk_pub`` (+ ``spk_sig``)     — signed X25519 prekey
-  * ``pqspk_pub`` (+ ``pqspk_sig``) — signed ML-KEM-1024 (last-resort) prekey
+  * ``ik_pub``                          — identity public key (Montgomery u-coord)
+  * ``spk_pub`` (+ ``spk_sig``)         — signed X25519 prekey
+  * ``pqspk_pub`` (+ ``pqspk_sig``)     — signed ML-KEM-1024 (last-resort) prekey
   * optional ``opk_pub`` (one-time X25519 prekey)
 
 The initiator derives::
 
-    DH1 = DH(IK_A_dh, SPK_B)        SS  = ML-KEM.Encaps(PQSPK_B) -> ct
-    DH2 = DH(EK_A,    IK_B_dh)
-    DH3 = DH(EK_A,    SPK_B)
-    DH4 = DH(EK_A,    OPK_B)        # omitted if no one-time prekey
+    DH1 = DH(IK_A, SPK_B)        SS  = ML-KEM.Encaps(PQSPK_B) -> ct
+    DH2 = DH(EK_A, IK_B)
+    DH3 = DH(EK_A, SPK_B)
+    DH4 = DH(EK_A, OPK_B)        # omitted if no one-time prekey
     SK  = HKDF(F || DH1 || DH2 || DH3 || DH4 || SS)
 
 where ``F = 0xFF * 32`` (X25519 domain-separation prefix). The responder
@@ -35,21 +34,15 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-    Ed25519PublicKey,
-)
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
 )
-from cryptography.hazmat.primitives.serialization import (
-    Encoding,
-    PublicFormat,
-)
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from kyber_py.ml_kem import ML_KEM_1024
 
 from ml_kem_braid.core.kdf import hkdf
+from ml_kem_braid.crypto import xeddsa
 
 # The post-quantum KEM used by PQXDH prekeys (monolithic encaps/decaps; the Braid
 # *incremental* split is a separate concern handled in core.ml_kem).
@@ -64,10 +57,6 @@ def _x25519_pub_bytes(pub: X25519PublicKey) -> bytes:
     return pub.public_bytes(Encoding.Raw, PublicFormat.Raw)
 
 
-def _ed25519_pub_bytes(pub: Ed25519PublicKey) -> bytes:
-    return pub.public_bytes(Encoding.Raw, PublicFormat.Raw)
-
-
 # ---------------------------------------------------------------------------
 # Key material
 # ---------------------------------------------------------------------------
@@ -75,48 +64,41 @@ def _ed25519_pub_bytes(pub: Ed25519PublicKey) -> bytes:
 
 @dataclass
 class IdentityKeyPair:
-    """Long-term identity: an Ed25519 signing key and an X25519 DH key."""
+    """Long-term identity: a single Curve25519 key used for BOTH X25519 DH and
+    XEdDSA signing (Signal's actual construction)."""
 
-    sign_priv: Ed25519PrivateKey
-    dh_priv: X25519PrivateKey
-
-    @property
-    def sign_pub(self) -> bytes:
-        return _ed25519_pub_bytes(self.sign_priv.public_key())
+    priv: bytes  # 32-byte clamped Curve25519 private key
 
     @property
-    def dh_pub(self) -> bytes:
-        return _x25519_pub_bytes(self.dh_priv.public_key())
+    def public(self) -> bytes:
+        return xeddsa.public_key(self.priv)
 
     def sign(self, data: bytes) -> bytes:
-        return self.sign_priv.sign(data)
+        return xeddsa.sign(self.priv, data)
+
+    def dh(self, peer_pub: bytes) -> bytes:
+        return xeddsa.dh(self.priv, peer_pub)
 
 
 @dataclass
 class PreKeyBundle:
     """Public prekey bundle published to the server and fetched by initiators."""
 
-    ik_sign_pub: bytes
-    ik_dh_pub: bytes
-    ik_dh_sig: bytes  # Ed25519 sig over ik_dh_pub (binds DH key to identity)
+    ik_pub: bytes            # single Curve25519 identity key (u-coordinate)
     spk_id: int
     spk_pub: bytes
-    spk_sig: bytes
+    spk_sig: bytes           # XEdDSA(ik) over spk_pub
     pqspk_id: int
     pqspk_pub: bytes
-    pqspk_sig: bytes
+    pqspk_sig: bytes         # XEdDSA(ik) over the ML-KEM encapsulation key
     opk_id: Optional[int] = None
     opk_pub: Optional[bytes] = None
 
     def verify(self) -> None:
         """Verify every signature in the bundle; raise on any failure."""
-        ik = Ed25519PublicKey.from_public_bytes(self.ik_sign_pub)
-        try:
-            ik.verify(self.ik_dh_sig, self.ik_dh_pub)
-            ik.verify(self.spk_sig, self.spk_pub)
-            ik.verify(self.pqspk_sig, self.pqspk_pub)
-        except InvalidSignature as exc:  # pragma: no cover - exercised in tests
-            raise InvalidSignature("PQXDH prekey bundle signature invalid") from exc
+        if not (xeddsa.verify(self.ik_pub, self.spk_pub, self.spk_sig)
+                and xeddsa.verify(self.ik_pub, self.pqspk_pub, self.pqspk_sig)):
+            raise InvalidSignature("PQXDH prekey bundle signature invalid")
 
 
 @dataclass
@@ -132,14 +114,11 @@ class PreKeySecrets:
 class InitialMessage:
     """Initiator-to-responder PQXDH handshake message (public)."""
 
-    ik_sign_pub: bytes
-    ik_dh_pub: bytes
-    ik_dh_sig: bytes  # Ed25519(ik_sign) over ik_dh_pub — binds the initiator's
-    #                   X25519 DH key to its signing identity (responder verifies)
-    ek_pub: bytes  # ephemeral X25519 public key
+    ik_pub: bytes            # initiator's single Curve25519 identity key
+    ek_pub: bytes            # ephemeral X25519 public key
     spk_id: int
     pqspk_id: int
-    kem_ct: bytes  # ML-KEM-1024 ciphertext
+    kem_ct: bytes            # ML-KEM-1024 ciphertext
     opk_id: Optional[int] = None
 
 
@@ -149,10 +128,7 @@ class InitialMessage:
 
 
 def create_identity() -> IdentityKeyPair:
-    return IdentityKeyPair(
-        sign_priv=Ed25519PrivateKey.generate(),
-        dh_priv=X25519PrivateKey.generate(),
-    )
+    return IdentityKeyPair(priv=xeddsa.generate_identity())
 
 
 def create_prekey_bundle(
@@ -187,9 +163,7 @@ def create_prekey_bundle(
     )
 
     bundle = PreKeyBundle(
-        ik_sign_pub=identity.sign_pub,
-        ik_dh_pub=identity.dh_pub,
-        ik_dh_sig=identity.sign(identity.dh_pub),
+        ik_pub=identity.public,
         spk_id=spk_id,
         spk_pub=spk_pub,
         spk_sig=spk_sig,
@@ -213,17 +187,18 @@ def create_prekey_bundle(
 
 
 def _derive_sk(
-    dhs: list[bytes], ss: bytes, ik_a_sign: bytes, ik_b_sign: bytes
+    dhs: list[bytes], ss: bytes, ik_a: bytes, ik_b: bytes
 ) -> bytes:
     """
     SK = HKDF(IKM = F || DH1..DHn || SS, info = PQXDH_INFO || IK_A || IK_B).
 
-    Binding both identity *signing* keys into ``info`` ties the derived secret to
-    who-talks-to-whom, defeating unknown-key-share / identity-misbinding attacks
-    (Signal PQXDH binds identities into the session, here via the KDF info).
+    Binding both identity keys (Montgomery u-coordinates) into ``info`` ties the
+    derived secret to who-talks-to-whom, defeating unknown-key-share /
+    identity-misbinding attacks (Signal PQXDH binds identities into the session,
+    here via the KDF info).
     """
     ikm = _F_PREFIX + b"".join(dhs) + ss
-    info = PQXDH_INFO + ik_a_sign + ik_b_sign
+    info = PQXDH_INFO + ik_a + ik_b
     return hkdf(ikm=ikm, salt=_HKDF_SALT, info=info, length=32)
 
 
@@ -239,25 +214,19 @@ def initiator_handshake(
 
     ek_priv = X25519PrivateKey.generate()
     spk_pub = X25519PublicKey.from_public_bytes(bundle.spk_pub)
-    ik_b_dh = X25519PublicKey.from_public_bytes(bundle.ik_dh_pub)
 
-    dh1 = initiator.dh_priv.exchange(spk_pub)
-    dh2 = ek_priv.exchange(ik_b_dh)
-    dh3 = ek_priv.exchange(spk_pub)
+    dh1 = initiator.dh(bundle.spk_pub)              # DH(IK_A, SPK_B)
+    dh2 = ek_priv.exchange(X25519PublicKey.from_public_bytes(bundle.ik_pub))  # DH(EK_A, IK_B)
+    dh3 = ek_priv.exchange(spk_pub)                 # DH(EK_A, SPK_B)
     dhs = [dh1, dh2, dh3]
-
     if bundle.opk_pub is not None:
-        opk_pub = X25519PublicKey.from_public_bytes(bundle.opk_pub)
-        dhs.append(ek_priv.exchange(opk_pub))
+        dhs.append(ek_priv.exchange(X25519PublicKey.from_public_bytes(bundle.opk_pub)))
 
     ss, kem_ct = PQXDH_KEM.encaps(bundle.pqspk_pub)
-    # A = initiator, B = responder (bundle owner).
-    sk = _derive_sk(dhs, ss, initiator.sign_pub, bundle.ik_sign_pub)
+    sk = _derive_sk(dhs, ss, initiator.public, bundle.ik_pub)
 
     message = InitialMessage(
-        ik_sign_pub=initiator.sign_pub,
-        ik_dh_pub=initiator.dh_pub,
-        ik_dh_sig=initiator.sign(initiator.dh_pub),
+        ik_pub=initiator.public,
         ek_pub=_x25519_pub_bytes(ek_priv.public_key()),
         spk_id=bundle.spk_id,
         pqspk_id=bundle.pqspk_id,
@@ -273,16 +242,10 @@ def responder_handshake(
     message: InitialMessage,
 ) -> bytes:
     """
-    Run the responder side. Authenticates the initiator's identity binding,
-    recomputes the same ``SK``, and **consumes** the one-time prekey so a replayed
-    :class:`InitialMessage` cannot re-derive the secret.
+    Run the responder side. Recomputes the same ``SK`` and **consumes** the
+    one-time prekey so a replayed :class:`InitialMessage` cannot re-derive the
+    secret. The initiator is authenticated by the DH legs (DH1/DH2) per PQXDH.
     """
-    # Authenticate the initiator: its X25519 DH key must be signed by its Ed25519
-    # identity key (the binding the bundle enforces for the responder direction).
-    Ed25519PublicKey.from_public_bytes(message.ik_sign_pub).verify(
-        message.ik_dh_sig, message.ik_dh_pub
-    )
-
     spk_priv = secrets.spk_priv.get(message.spk_id)
     if spk_priv is None:
         raise KeyError(f"unknown signed prekey id {message.spk_id}")
@@ -290,25 +253,22 @@ def responder_handshake(
     if pq_dk is None:
         raise KeyError(f"unknown PQ prekey id {message.pqspk_id}")
 
-    ik_a_dh = X25519PublicKey.from_public_bytes(message.ik_dh_pub)
+    ik_a_dh = X25519PublicKey.from_public_bytes(message.ik_pub)
     ek_a = X25519PublicKey.from_public_bytes(message.ek_pub)
 
     dh1 = spk_priv.exchange(ik_a_dh)
-    dh2 = responder.dh_priv.exchange(ek_a)
+    dh2 = responder.dh(message.ek_pub)             # DH(EK_A, IK_B)
     dh3 = spk_priv.exchange(ek_a)
     dhs = [dh1, dh2, dh3]
-
     if message.opk_id is not None:
         opk_priv = secrets.opk_priv.get(message.opk_id)
         if opk_priv is None:
-            # Already consumed (replay) or never existed.
             raise KeyError(f"one-time prekey {message.opk_id} unavailable (replay?)")
         dhs.append(opk_priv.exchange(ek_a))
-        del secrets.opk_priv[message.opk_id]  # one-time: consume on use
+        del secrets.opk_priv[message.opk_id]
 
     ss = PQXDH_KEM.decaps(pq_dk, message.kem_ct)
-    # A = initiator (message sender), B = responder (self).
-    return _derive_sk(dhs, ss, message.ik_sign_pub, responder.sign_pub)
+    return _derive_sk(dhs, ss, message.ik_pub, responder.public)
 
 
 if __name__ == "__main__":

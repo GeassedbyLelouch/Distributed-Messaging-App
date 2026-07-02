@@ -71,3 +71,10 @@ def test_sk_seeds_working_aead_channel():
     sk_b = responder_handshake(bob, secrets, msg)
     blob = aead_encrypt(sk_a, b"secret", b"ad")
     assert aead_decrypt(sk_b, blob, b"ad") == b"secret"
+
+
+def test_bundle_uses_xeddsa_single_identity():
+    bob = create_identity()
+    bundle, _ = create_prekey_bundle(bob)
+    assert len(bundle.ik_pub) == 32 and len(bundle.spk_sig) == 64
+    assert not hasattr(bundle, "ik_sign_pub") and not hasattr(bundle, "ik_dh_sig")

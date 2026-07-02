@@ -51,6 +51,11 @@ PQXDH_INFO = b"MLKEMBraid_PQXDH_CURVE25519_SHA-256_ML-KEM-1024"
 _F_PREFIX = b"\xff" * 32  # X25519 KDF domain separator (X3DH/PQXDH convention)
 _HKDF_SALT = b"\x00" * 32
 
+# XEdDSA domain-separation contexts for the identity key's prekey signatures
+# (see ml_kem_braid.crypto.xeddsa.sign_ctx).
+_SPK_CONTEXT = b"pqxdh/signed-prekey"
+_PQSPK_CONTEXT = b"pqxdh/pq-signed-prekey"
+
 
 def _x25519_pub_bytes(pub: X25519PublicKey) -> bytes:
     return pub.public_bytes(Encoding.Raw, PublicFormat.Raw)
@@ -72,8 +77,12 @@ class IdentityKeyPair:
     def public(self) -> bytes:
         return xeddsa.public_key(self.priv)
 
-    def sign(self, data: bytes) -> bytes:
-        return xeddsa.sign(self.priv, data)
+    def sign_registration_challenge(self, challenge: bytes) -> bytes:
+        """Raw (unscoped) XEdDSA signature — for the registration ownership proof
+        ONLY. The registration challenge carries its own in-band domain tag
+        (``MLKEMBraid-register:``). For every other identity-key signature use
+        ``xeddsa.sign_ctx`` so the signature is domain-separated by role."""
+        return xeddsa.sign(self.priv, challenge)
 
     def dh(self, peer_pub: bytes) -> bytes:
         return xeddsa.dh(self.priv, peer_pub)
@@ -95,8 +104,9 @@ class PreKeyBundle:
 
     def verify(self) -> None:
         """Verify every signature in the bundle; raise on any failure."""
-        if not (xeddsa.verify(self.ik_pub, self.spk_pub, self.spk_sig)
-                and xeddsa.verify(self.ik_pub, self.pqspk_pub, self.pqspk_sig)):
+        if not (xeddsa.verify_ctx(self.ik_pub, _SPK_CONTEXT, self.spk_pub, self.spk_sig)
+                and xeddsa.verify_ctx(
+                    self.ik_pub, _PQSPK_CONTEXT, self.pqspk_pub, self.pqspk_sig)):
             raise InvalidSignature("PQXDH prekey bundle signature invalid")
 
 
@@ -145,11 +155,11 @@ def create_prekey_bundle(
     # Signed X25519 prekey.
     spk_priv = X25519PrivateKey.generate()
     spk_pub = _x25519_pub_bytes(spk_priv.public_key())
-    spk_sig = identity.sign(spk_pub)
+    spk_sig = xeddsa.sign_ctx(identity.priv, _SPK_CONTEXT, spk_pub)
 
     # Signed ML-KEM-1024 prekey (post-quantum).
     pq_ek, pq_dk = PQXDH_KEM.keygen()
-    pqspk_sig = identity.sign(pq_ek)
+    pqspk_sig = xeddsa.sign_ctx(identity.priv, _PQSPK_CONTEXT, pq_ek)
 
     # One-time X25519 prekeys.
     opk_priv: Dict[int, X25519PrivateKey] = {}

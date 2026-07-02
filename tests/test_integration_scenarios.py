@@ -419,7 +419,7 @@ class TestMultiDeviceUser:
         def register_bob_device(registration_id: int) -> dict:
             bundle, _ = create_prekey_bundle(shared_identity, num_one_time=4)
             one_time = {}  # skip OTKs for simplicity
-            proof = shared_identity.sign(registration_challenge("bob", registration_id))
+            proof = shared_identity.sign_registration_challenge(registration_challenge("bob", registration_id))
             r = tc.post(
                 "/register",
                 json={
@@ -457,7 +457,7 @@ class TestMultiDeviceUser:
 
         def register_bob_device(registration_id: int) -> dict:
             bundle, _ = create_prekey_bundle(shared_identity, num_one_time=2)
-            proof = shared_identity.sign(registration_challenge("bob", registration_id))
+            proof = shared_identity.sign_registration_challenge(registration_challenge("bob", registration_id))
             r = tc.post(
                 "/register",
                 json={
@@ -512,7 +512,7 @@ class TestMultiDeviceUser:
         dev_ids = []
         for rid in (1, 2):
             bundle, _ = create_prekey_bundle(shared_identity, num_one_time=2)
-            proof = shared_identity.sign(registration_challenge("bob", rid))
+            proof = shared_identity.sign_registration_challenge(registration_challenge("bob", rid))
             r = tc.post(
                 "/register",
                 json={

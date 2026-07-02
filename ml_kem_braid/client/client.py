@@ -133,7 +133,7 @@ class BraidChatClient:
         }
         # Prove ownership of the username by signing the registration challenge
         # with the identity key (the server verifies this against ik_pub).
-        proof = self.identity.sign(registration_challenge(self.username, registration_id))
+        proof = self.identity.sign_registration_challenge(registration_challenge(self.username, registration_id))
         resp = self.transport.register(
             {
                 "username": self.username,

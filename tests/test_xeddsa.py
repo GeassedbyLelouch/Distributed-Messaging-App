@@ -110,3 +110,61 @@ def test_verify_rejects_neutral_public_key():
     """Neutral / low-order public key (all-zero u-coordinate) must be rejected."""
     sig = bytes.fromhex(_KAT_SIG_HEX)
     assert xeddsa.verify(b"\x00" * 32, _KAT_MSG, sig) is False
+
+
+# ---------------------------------------------------------------------------
+# Domain-separated signing (sign_ctx / verify_ctx)
+# ---------------------------------------------------------------------------
+
+def test_sign_ctx_roundtrip():
+    priv = xeddsa.generate_identity(); pub = xeddsa.public_key(priv)
+    sig = xeddsa.sign_ctx(priv, b"role-a", b"payload")
+    assert xeddsa.verify_ctx(pub, b"role-a", b"payload", sig)
+
+def test_sign_ctx_wrong_context_rejected():
+    """A signature minted for one context must not verify under another."""
+    priv = xeddsa.generate_identity(); pub = xeddsa.public_key(priv)
+    sig = xeddsa.sign_ctx(priv, b"role-a", b"payload")
+    assert not xeddsa.verify_ctx(pub, b"role-b", b"payload", sig)
+
+def test_ctx_signature_not_valid_as_raw():
+    """A context-scoped signature must not verify as a bare sign() over msg, and
+    the framed-bytes concatenation trick is blocked by the raw-path guard."""
+    priv = xeddsa.generate_identity(); pub = xeddsa.public_key(priv)
+    sig = xeddsa.sign_ctx(priv, b"role-a", b"payload")
+    assert not xeddsa.verify(pub, b"payload", sig)
+    # Reconstructing the exact framed bytes and feeding them to the RAW verify
+    # path must still be rejected — verify() refuses any DOMAIN_TAG-prefixed msg.
+    framed = xeddsa._frame(b"role-a", b"payload")
+    assert not xeddsa.verify(pub, framed, sig)
+
+def test_raw_signature_not_valid_as_ctx():
+    """A bare sign() signature must not verify under any context."""
+    priv = xeddsa.generate_identity(); pub = xeddsa.public_key(priv)
+    sig = xeddsa.sign(priv, b"payload")
+    assert not xeddsa.verify_ctx(pub, b"role-a", b"payload", sig)
+
+def test_raw_sign_rejects_domain_tag_prefixed_message():
+    """sign() must refuse a raw message that starts with DOMAIN_TAG (reserved
+    for domain-separated signing) so the two byte-spaces stay disjoint."""
+    import pytest
+    priv = xeddsa.generate_identity()
+    with pytest.raises(ValueError):
+        xeddsa.sign(priv, xeddsa.DOMAIN_TAG + b"anything")
+
+def test_raw_verify_rejects_domain_tag_prefixed_message():
+    """verify() must reject any raw message that starts with DOMAIN_TAG, even
+    when a genuine ctx signature exists over those exact bytes."""
+    priv = xeddsa.generate_identity(); pub = xeddsa.public_key(priv)
+    framed = xeddsa.DOMAIN_TAG + b"\x00\x06role-apayload"
+    sig = xeddsa._sign_raw(priv, framed, None)  # bypass the guard to mint one
+    assert xeddsa._verify_raw(pub, framed, sig)          # genuinely valid bytes
+    assert not xeddsa.verify(pub, framed, sig)            # but rejected via guard
+
+def test_ctx_framing_is_unambiguous():
+    """Length-prefixing the context prevents (ctx, msg) boundary collisions:
+    ('ab', 'c') and ('a', 'bc') must produce independent signatures."""
+    priv = xeddsa.generate_identity(); pub = xeddsa.public_key(priv)
+    sig = xeddsa.sign_ctx(priv, b"ab", b"c")
+    assert not xeddsa.verify_ctx(pub, b"a", b"bc", sig)
+    assert xeddsa.verify_ctx(pub, b"ab", b"c", sig)

@@ -1,4 +1,22 @@
+ML-KEM-Braid
+Copyright (C) 2026 KEM-Braid VPN research
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See the LICENSE file for the full text.
+
+------------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------------
+
 ml_kem_braid/crypto/_curve25519/curve/ contains Signal's curve25519 reference C
-(from python-axolotl-curve25519), licensed GPLv3. This imposes GPLv3 obligations
-on distributions that include the compiled extension. Resolve the GPLv3-vs-MIT
-question (relicense, isolate, or replace the backend) before merging this branch or distributing any build that includes the compiled extension.
+(vendored from python-axolotl-curve25519), licensed GPLv3. This code is
+compiled into and linked with the _curve25519 extension module. Because that
+GPLv3 code is combined into the shipped binary, the project as a whole is
+distributed under the GPLv3 (GPL-3.0-or-later); this is the resolution of the
+previously-deferred GPLv3-vs-MIT question.
+
+Other Python dependencies (kyber-py, cryptography, pycryptodome, reedsolo,
+fastapi, uvicorn, httpx, pydantic) are distributed under their own permissive
+licenses (MIT / BSD / Apache-2.0), which are compatible with GPLv3.

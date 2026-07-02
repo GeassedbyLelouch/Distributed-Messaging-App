@@ -177,7 +177,7 @@ def test_registration_id_upper_bound():
     from ml_kem_braid.wire import b64e, bundle_to_dict, registration_challenge
 
     bundle, _ = create_prekey_bundle(bob)
-    proof = bob.sign(registration_challenge("x", 2**31))
+    proof = bob.sign_registration_challenge(registration_challenge("x", 2**31))
     r = c.post("/register", json={
         "username": "x", "registration_id": 2**31,
         "bundle": bundle_to_dict(bundle), "proof_sig": b64e(proof),

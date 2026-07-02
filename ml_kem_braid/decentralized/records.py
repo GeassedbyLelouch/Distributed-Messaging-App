@@ -9,6 +9,9 @@ from ml_kem_braid.crypto import xeddsa
 
 from ml_kem_braid.decentralized.canonical import canonical_json
 
+# XEdDSA domain-separation context for signed records (see xeddsa.sign_ctx).
+_RECORD_CONTEXT = b"decentralized/record"
+
 
 _RECORD_FIELDS = {
     "type",
@@ -176,7 +179,7 @@ def sign_record(
         body=body,
         signature=b"",
     )
-    signature = xeddsa.sign(signing_key, unsigned.signing_payload())
+    signature = xeddsa.sign_ctx(signing_key, _RECORD_CONTEXT, unsigned.signing_payload())
     return SignedRecord(
         record_type=unsigned.record_type,
         version=unsigned.version,
@@ -191,7 +194,9 @@ def sign_record(
 
 
 def verify_record(record: SignedRecord, public_key: bytes) -> bool:
-    if not xeddsa.verify(public_key, record.signing_payload(), record.signature):
+    if not xeddsa.verify_ctx(
+        public_key, _RECORD_CONTEXT, record.signing_payload(), record.signature
+    ):
         return False
     return record.author_identity == public_key
 

@@ -5,3 +5,5 @@ __pycache__/
 docs/superpowers/
 .claude
 ml_kem_braid/crypto/_curve25519*.so
+build/
+*.egg-info/

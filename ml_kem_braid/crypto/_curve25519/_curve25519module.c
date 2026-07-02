@@ -8,6 +8,14 @@ int curve25519_sign(unsigned char* signature_out, const unsigned char* curve2551
 int curve25519_verify(const unsigned char* signature, const unsigned char* curve25519_pubkey,
                       const unsigned char* msg, const unsigned long msg_len);
 int curve25519_donna(char *mypublic, const char *secret, const char *basepoint);
+int generalized_xveddsa_25519_sign(unsigned char* signature_out /*96*/,
+    const unsigned char* x25519_privkey_scalar /*32*/, const unsigned char* msg,
+    const unsigned long msg_len, const unsigned char* random,
+    const unsigned char* customization_label, const unsigned long customization_label_len);
+int generalized_xveddsa_25519_verify(unsigned char* vrf_out /*32*/,
+    const unsigned char* signature /*96*/, const unsigned char* x25519_pubkey_bytes /*32*/,
+    const unsigned char* msg, const unsigned long msg_len,
+    const unsigned char* customization_label, const unsigned long customization_label_len);
 
 static PyObject *calculateSignature(PyObject *self, PyObject *args) {
     const char *random,*privatekey,*message; char signature[64];
@@ -48,12 +56,38 @@ static PyObject *calculateAgreement(PyObject *self, PyObject *args) {
     return PyBytes_FromStringAndSize(shared_key,32);
 }
 
+static PyObject *calculateVrfSignature(PyObject *self, PyObject *args) {
+    const char *random,*privatekey,*message,*label; char signature[96];
+    Py_ssize_t randomlen,privatekeylen,messagelen,labellen;
+    if (!PyArg_ParseTuple(args, Y"#"Y"#"Y"#"Y"#:vrfsign",&random,&randomlen,&privatekey,&privatekeylen,&message,&messagelen,&label,&labellen)) return NULL;
+    if (privatekeylen!=32){PyErr_SetString(PyExc_ValueError,"private key must be 32-byte string");return NULL;}
+    if (randomlen!=64){PyErr_SetString(PyExc_ValueError,"random must be 64-byte string");return NULL;}
+    int rc=generalized_xveddsa_25519_sign((unsigned char*)signature,(const unsigned char*)privatekey,
+        (const unsigned char*)message,(unsigned long)messagelen,(const unsigned char*)random,
+        (const unsigned char*)label,(unsigned long)labellen);
+    if (rc!=0){PyErr_SetString(PyExc_ValueError,"VRF signing failed");return NULL;}
+    return PyBytes_FromStringAndSize(signature,96);
+}
+static PyObject *verifyVrfSignature(PyObject *self, PyObject *args) {
+    const char *publickey,*message,*signature,*label; unsigned char vrf_out[32];
+    Py_ssize_t publickeylen,messagelen,signaturelen,labellen;
+    if (!PyArg_ParseTuple(args, Y"#"Y"#"Y"#"Y"#:vrfverify",&publickey,&publickeylen,&message,&messagelen,&signature,&signaturelen,&label,&labellen)) return NULL;
+    if (publickeylen!=32){PyErr_SetString(PyExc_ValueError,"publickey must be 32-byte string");return NULL;}
+    if (signaturelen!=96){PyErr_SetString(PyExc_ValueError,"signature must be 96-byte string");return NULL;}
+    int rc=generalized_xveddsa_25519_verify(vrf_out,(const unsigned char*)signature,(const unsigned char*)publickey,
+        (const unsigned char*)message,(unsigned long)messagelen,(const unsigned char*)label,(unsigned long)labellen);
+    if (rc!=0){ Py_RETURN_NONE; }
+    return PyBytes_FromStringAndSize((char*)vrf_out,32);
+}
+
 static PyMethodDef curve25519_functions[] = {
     {"calculateSignature",calculateSignature,METH_VARARGS,"random+privatekey+message->signature"},
     {"verifySignature",verifySignature,METH_VARARGS,"publickey+message+signature->0 if valid"},
     {"generatePrivateKey",generatePrivateKey,METH_VARARGS,"data->private"},
     {"generatePublicKey",generatePublicKey,METH_VARARGS,"private->public"},
     {"calculateAgreement",calculateAgreement,METH_VARARGS,"private+public->shared"},
+    {"calculateVrfSignature",calculateVrfSignature,METH_VARARGS,"random+privkey+msg+label->proof96"},
+    {"verifyVrfSignature",verifyVrfSignature,METH_VARARGS,"pub+msg+sig96+label->vrf_out32 or None"},
     {NULL,NULL,0,NULL},
 };
 static struct PyModuleDef curve25519_module = {

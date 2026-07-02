@@ -37,8 +37,8 @@ def store(request, tmp_path) -> StoreBackend:
 # Helpers
 # ---------------------------------------------------------------------------
 
-_BUNDLE_A = {"ik_sign_pub": "aaa", "ik_kem_pub": "bbb", "spk_pub": "ccc"}
-_BUNDLE_B = {"ik_sign_pub": "xxx", "ik_kem_pub": "yyy", "spk_pub": "zzz"}
+_BUNDLE_A = {"ik_pub": "aaa", "ik_kem_pub": "bbb", "spk_pub": "ccc"}
+_BUNDLE_B = {"ik_pub": "xxx", "ik_kem_pub": "yyy", "spk_pub": "zzz"}
 _IK_A = b"\x01" * 32
 _IK_B = b"\x02" * 32
 _OPK_SET = {1: "opk-one", 2: "opk-two"}
@@ -337,7 +337,7 @@ class TestSharedBehavior:
             store,
             username="Carol.2042",
             ik=b"\x03" * 32,
-            bundle={"ik_sign_pub": "111", "ik_kem_pub": "222", "spk_pub": "333"},
+            bundle={"ik_pub": "111", "ik_kem_pub": "222", "spk_pub": "333"},
         )
 
         older = store.add_contact(

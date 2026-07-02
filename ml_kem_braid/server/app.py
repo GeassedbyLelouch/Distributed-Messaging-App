@@ -34,14 +34,13 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, Response
 
+from ml_kem_braid.crypto import xeddsa
 from ml_kem_braid.pqxdh import create_identity, create_prekey_bundle
 from ml_kem_braid.pqxdh.pqxdh import _x25519_pub_bytes
 from ml_kem_braid.decentralized.services import DecentralizedServices
@@ -118,8 +117,8 @@ class RegisterRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     registration_id: int = Field(ge=0, lt=2**31)
     bundle: dict
-    # Ed25519 signature over registration_challenge(username, registration_id),
-    # proving possession of the bundle's ik_sign_pub (base64).
+    # XEdDSA signature over registration_challenge(username, registration_id),
+    # proving possession of the bundle's ik_pub (base64).
     proof_sig: str
     one_time_prekeys: dict[str, str] = Field(default_factory=dict)
 
@@ -448,15 +447,13 @@ def create_app(
         # Authenticate ownership: the bundle's identity key must sign the
         # registration challenge (proves the registrant holds the private key).
         try:
-            ik_sign_pub = b64d(req.bundle["ik_sign_pub"])
+            ik_pub = b64d(req.bundle["ik_pub"])
             proof = b64d(req.proof_sig)
         except (KeyError, ValueError):
             raise HTTPException(status_code=400, detail="malformed bundle/proof")
-        try:
-            Ed25519PublicKey.from_public_bytes(ik_sign_pub).verify(
-                proof, registration_challenge(req.username, req.registration_id)
-            )
-        except InvalidSignature:
+        if not xeddsa.verify(
+            ik_pub, registration_challenge(req.username, req.registration_id), proof
+        ):
             raise HTTPException(status_code=401, detail="invalid registration proof")
 
         otks = {int(k): v for k, v in req.one_time_prekeys.items()}
@@ -465,7 +462,7 @@ def create_app(
                 username=req.username,
                 registration_id=req.registration_id,
                 bundle=req.bundle,
-                identity_key=ik_sign_pub,
+                identity_key=ik_pub,
                 one_time_prekeys=otks,
             )
         except PermissionError as exc:
@@ -499,7 +496,7 @@ def create_app(
                     username=req.username,
                     registration_id=req.registration_id,
                     bundle=bundle_to_dict(bundle),
-                    identity_key=identity.sign_pub,
+                    identity_key=identity.public,
                     one_time_prekeys=one_time_prekeys,
                 )
             except PermissionError as exc:

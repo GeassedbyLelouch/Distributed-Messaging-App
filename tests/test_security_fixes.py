@@ -7,7 +7,6 @@ Each test fails on the pre-fix behaviour and passes after the corresponding fix.
 import os
 
 import pytest
-from cryptography.exceptions import InvalidSignature
 from fastapi.testclient import TestClient
 
 from ml_kem_braid.client.client import BraidChatClient, HttpTransport
@@ -26,14 +25,14 @@ from ml_kem_braid.sesame.store import SesameStore
 # -- #1/#2 PQXDH identity binding -------------------------------------------
 
 
-def test_responder_rejects_unbound_initiator_dh_key():
-    """A forged ik_dh_sig (DH key not signed by the claimed identity) is rejected."""
+def test_responder_rejects_tampered_initiator_identity():
+    """Tampering the initiator's identity key yields a different SK, not agreement."""
     alice, bob = create_identity(), create_identity()
     bundle, secrets = create_prekey_bundle(bob, num_one_time=1)
-    _, msg = initiator_handshake(alice, bundle)
-    msg.ik_dh_sig = bytes(b ^ 0xFF for b in msg.ik_dh_sig)  # break the binding
-    with pytest.raises(InvalidSignature):
-        responder_handshake(bob, secrets, msg)
+    sk_a, msg = initiator_handshake(alice, bundle)
+    msg.ik_pub = bytes(b ^ 0xFF for b in msg.ik_pub)  # corrupt identity
+    sk_b = responder_handshake(bob, secrets, msg)
+    assert sk_a != sk_b
 
 
 def test_sk_bound_to_identities():

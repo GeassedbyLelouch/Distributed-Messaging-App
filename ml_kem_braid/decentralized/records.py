@@ -5,11 +5,7 @@ import math
 from types import MappingProxyType
 from typing import Any, Mapping, Optional
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-    Ed25519PublicKey,
-)
+from ml_kem_braid.crypto import xeddsa
 
 from ml_kem_braid.decentralized.canonical import canonical_json
 
@@ -164,7 +160,7 @@ def sign_record(
     author_device_id: int,
     sequence: int,
     body: dict[str, Any],
-    signing_key: Ed25519PrivateKey,
+    signing_key: bytes,           # 32-byte Curve25519 private key
     created_at: float,
     expires_at: Optional[float] = None,
     version: int = 1,
@@ -180,7 +176,7 @@ def sign_record(
         body=body,
         signature=b"",
     )
-    signature = signing_key.sign(unsigned.signing_payload())
+    signature = xeddsa.sign(signing_key, unsigned.signing_payload())
     return SignedRecord(
         record_type=unsigned.record_type,
         version=unsigned.version,
@@ -195,14 +191,9 @@ def sign_record(
 
 
 def verify_record(record: SignedRecord, public_key: bytes) -> bool:
-    try:
-        Ed25519PublicKey.from_public_bytes(public_key).verify(
-            record.signature,
-            record.signing_payload(),
-        )
-        return record.author_identity == public_key
-    except (InvalidSignature, TypeError, ValueError):
+    if not xeddsa.verify(public_key, record.signing_payload(), record.signature):
         return False
+    return record.author_identity == public_key
 
 
 def _contact_string_field(record: SignedRecord, field: str) -> str | None:

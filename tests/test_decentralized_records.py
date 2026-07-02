@@ -1,8 +1,8 @@
 import math
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from ml_kem_braid.crypto import xeddsa
 from ml_kem_braid.decentralized.canonical import canonical_json
 from ml_kem_braid.decentralized.records import (
     SignedRecord,
@@ -13,8 +13,8 @@ from ml_kem_braid.decentralized.records import (
 
 
 def test_signed_record_verifies_with_canonical_body_order():
-    key = Ed25519PrivateKey.generate()
-    pub = key.public_key().public_bytes_raw()
+    key = xeddsa.generate_identity()
+    pub = xeddsa.public_key(key)
     record = sign_record(
         record_type="contact.request",
         author_identity=pub,
@@ -31,8 +31,8 @@ def test_signed_record_verifies_with_canonical_body_order():
 
 
 def test_signed_record_payload_is_independent_of_body_insertion_order():
-    key = Ed25519PrivateKey.generate()
-    pub = key.public_key().public_bytes_raw()
+    key = xeddsa.generate_identity()
+    pub = xeddsa.public_key(key)
     body_a = {"recipient": "Bob.1042", "requester": "Alice.42"}
     body_b = {"requester": "Alice.42", "recipient": "Bob.1042"}
     record_a = sign_record(
@@ -61,8 +61,8 @@ def test_signed_record_payload_is_independent_of_body_insertion_order():
 
 
 def test_signed_record_body_cannot_be_mutated_after_signing():
-    key = Ed25519PrivateKey.generate()
-    pub = key.public_key().public_bytes_raw()
+    key = xeddsa.generate_identity()
+    pub = xeddsa.public_key(key)
     body = {"request_id": "req-1", "metadata": {"priority": "normal"}}
     record = sign_record(
         record_type="contact.accept",
@@ -88,8 +88,8 @@ def test_signed_record_body_cannot_be_mutated_after_signing():
 
 
 def test_signed_record_rejects_body_tamper():
-    key = Ed25519PrivateKey.generate()
-    pub = key.public_key().public_bytes_raw()
+    key = xeddsa.generate_identity()
+    pub = xeddsa.public_key(key)
     record = sign_record(
         record_type="contact.accept",
         author_identity=pub,
@@ -121,8 +121,8 @@ def test_canonical_json_rejects_non_finite_floats():
 
 
 def test_signed_record_rejects_non_finite_signed_payload_values():
-    key = Ed25519PrivateKey.generate()
-    pub = key.public_key().public_bytes_raw()
+    key = xeddsa.generate_identity()
+    pub = xeddsa.public_key(key)
 
     with pytest.raises(ValueError):
         sign_record(
@@ -149,8 +149,8 @@ def test_signed_record_rejects_non_finite_signed_payload_values():
 
 
 def test_signed_record_round_trips_through_dict_and_verifies():
-    key = Ed25519PrivateKey.generate()
-    pub = key.public_key().public_bytes_raw()
+    key = xeddsa.generate_identity()
+    pub = xeddsa.public_key(key)
     record = sign_record(
         record_type="contact.request",
         author_identity=pub,
@@ -170,8 +170,8 @@ def test_signed_record_round_trips_through_dict_and_verifies():
 
 
 def test_signed_record_from_dict_rejects_malformed_hex_inputs():
-    key = Ed25519PrivateKey.generate()
-    pub = key.public_key().public_bytes_raw()
+    key = xeddsa.generate_identity()
+    pub = xeddsa.public_key(key)
     record_dict = sign_record(
         record_type="contact.request",
         author_identity=pub,
@@ -191,8 +191,8 @@ def test_signed_record_from_dict_rejects_malformed_hex_inputs():
 
 
 def test_signed_record_from_dict_rejects_malleable_wire_format():
-    key = Ed25519PrivateKey.generate()
-    pub = key.public_key().public_bytes_raw()
+    key = xeddsa.generate_identity()
+    pub = xeddsa.public_key(key)
     record_dict = sign_record(
         record_type="contact.request",
         author_identity=pub,
@@ -242,10 +242,10 @@ def test_signed_record_from_dict_rejects_malleable_wire_format():
 
 
 def test_contact_state_requires_recipient_accept_signature():
-    alice_key = Ed25519PrivateKey.generate()
-    bob_key = Ed25519PrivateKey.generate()
-    alice_pub = alice_key.public_key().public_bytes_raw()
-    bob_pub = bob_key.public_key().public_bytes_raw()
+    alice_key = xeddsa.generate_identity()
+    bob_key = xeddsa.generate_identity()
+    alice_pub = xeddsa.public_key(alice_key)
+    bob_pub = xeddsa.public_key(bob_key)
     request = sign_record(
         record_type="contact.request",
         author_identity=alice_pub,
@@ -281,10 +281,10 @@ def test_contact_state_requires_recipient_accept_signature():
 
 
 def test_contact_state_rejects_accept_from_requester():
-    alice_key = Ed25519PrivateKey.generate()
-    bob_key = Ed25519PrivateKey.generate()
-    alice_pub = alice_key.public_key().public_bytes_raw()
-    bob_pub = bob_key.public_key().public_bytes_raw()
+    alice_key = xeddsa.generate_identity()
+    bob_key = xeddsa.generate_identity()
+    alice_pub = xeddsa.public_key(alice_key)
+    bob_pub = xeddsa.public_key(bob_key)
     request = sign_record(
         record_type="contact.request",
         author_identity=alice_pub,
@@ -320,10 +320,10 @@ def test_contact_state_rejects_accept_from_requester():
 
 
 def test_contact_state_uses_request_conversation_id_for_accept():
-    alice_key = Ed25519PrivateKey.generate()
-    bob_key = Ed25519PrivateKey.generate()
-    alice_pub = alice_key.public_key().public_bytes_raw()
-    bob_pub = bob_key.public_key().public_bytes_raw()
+    alice_key = xeddsa.generate_identity()
+    bob_key = xeddsa.generate_identity()
+    alice_pub = xeddsa.public_key(alice_key)
+    bob_pub = xeddsa.public_key(bob_key)
     request = sign_record(
         record_type="contact.request",
         author_identity=alice_pub,
@@ -360,10 +360,10 @@ def test_contact_state_uses_request_conversation_id_for_accept():
 
 
 def test_contact_state_ignores_malformed_request_without_crashing():
-    alice_key = Ed25519PrivateKey.generate()
-    bob_key = Ed25519PrivateKey.generate()
-    alice_pub = alice_key.public_key().public_bytes_raw()
-    bob_pub = bob_key.public_key().public_bytes_raw()
+    alice_key = xeddsa.generate_identity()
+    bob_key = xeddsa.generate_identity()
+    alice_pub = xeddsa.public_key(alice_key)
+    bob_pub = xeddsa.public_key(bob_key)
     malformed_request = sign_record(
         record_type="contact.request",
         author_identity=alice_pub,
@@ -430,10 +430,10 @@ def test_contact_state_ignores_malformed_request_without_crashing():
 
 
 def test_contact_state_ignores_malformed_contact_bodies_without_crashing():
-    alice_key = Ed25519PrivateKey.generate()
-    bob_key = Ed25519PrivateKey.generate()
-    alice_pub = alice_key.public_key().public_bytes_raw()
-    bob_pub = bob_key.public_key().public_bytes_raw()
+    alice_key = xeddsa.generate_identity()
+    bob_key = xeddsa.generate_identity()
+    alice_pub = xeddsa.public_key(alice_key)
+    bob_pub = xeddsa.public_key(bob_key)
     malformed_records = [
         sign_record(
             record_type="contact.request",
@@ -521,10 +521,10 @@ def test_contact_state_ignores_malformed_contact_bodies_without_crashing():
 
 
 def test_contact_state_duplicate_request_replay_does_not_reset_accepted_state():
-    alice_key = Ed25519PrivateKey.generate()
-    bob_key = Ed25519PrivateKey.generate()
-    alice_pub = alice_key.public_key().public_bytes_raw()
-    bob_pub = bob_key.public_key().public_bytes_raw()
+    alice_key = xeddsa.generate_identity()
+    bob_key = xeddsa.generate_identity()
+    alice_pub = xeddsa.public_key(alice_key)
+    bob_pub = xeddsa.public_key(bob_key)
     request = sign_record(
         record_type="contact.request",
         author_identity=alice_pub,
@@ -577,10 +577,10 @@ def test_contact_state_duplicate_request_replay_does_not_reset_accepted_state():
 
 
 def test_contact_state_deny_uses_request_conversation_id():
-    alice_key = Ed25519PrivateKey.generate()
-    bob_key = Ed25519PrivateKey.generate()
-    alice_pub = alice_key.public_key().public_bytes_raw()
-    bob_pub = bob_key.public_key().public_bytes_raw()
+    alice_key = xeddsa.generate_identity()
+    bob_key = xeddsa.generate_identity()
+    alice_pub = xeddsa.public_key(alice_key)
+    bob_pub = xeddsa.public_key(bob_key)
     request = sign_record(
         record_type="contact.request",
         author_identity=alice_pub,
@@ -617,10 +617,10 @@ def test_contact_state_deny_uses_request_conversation_id():
 
 
 def test_contact_state_cancel_uses_request_conversation_id():
-    alice_key = Ed25519PrivateKey.generate()
-    bob_key = Ed25519PrivateKey.generate()
-    alice_pub = alice_key.public_key().public_bytes_raw()
-    bob_pub = bob_key.public_key().public_bytes_raw()
+    alice_key = xeddsa.generate_identity()
+    bob_key = xeddsa.generate_identity()
+    alice_pub = xeddsa.public_key(alice_key)
+    bob_pub = xeddsa.public_key(bob_key)
     request = sign_record(
         record_type="contact.request",
         author_identity=alice_pub,
@@ -655,12 +655,12 @@ def test_contact_state_cancel_uses_request_conversation_id():
 
 
 def test_contact_state_ignores_untrusted_and_invalid_signature_records():
-    alice_key = Ed25519PrivateKey.generate()
-    bob_key = Ed25519PrivateKey.generate()
-    mallory_key = Ed25519PrivateKey.generate()
-    alice_pub = alice_key.public_key().public_bytes_raw()
-    bob_pub = bob_key.public_key().public_bytes_raw()
-    mallory_pub = mallory_key.public_key().public_bytes_raw()
+    alice_key = xeddsa.generate_identity()
+    bob_key = xeddsa.generate_identity()
+    mallory_key = xeddsa.generate_identity()
+    alice_pub = xeddsa.public_key(alice_key)
+    bob_pub = xeddsa.public_key(bob_key)
+    mallory_pub = xeddsa.public_key(mallory_key)
     valid_request = sign_record(
         record_type="contact.request",
         author_identity=alice_pub,

@@ -4,12 +4,16 @@ HOST = "127.0.0.1"
 PORT = 5000
 
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.connect((HOST, PORT))
+s.bind((HOST, PORT))
+s.listen()
 
-message = "hello from client"
-s.sendall(message.encode())
+print("waiting for connection...")
 
-data = s.recv(1024)
-print("Received", data.decode())
+conn, addr = s.accept()
+print("connected:", addr)
 
+data = conn.recv(1024)
+print("got:", data.decode())
+
+conn.close()
 s.close()

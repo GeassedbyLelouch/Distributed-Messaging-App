@@ -24,14 +24,14 @@ from ml_kem_braid.attestation.identity import (
 )
 from ml_kem_braid.attestation.noise import SecureChannel, nkhfs_initiate, nkhfs_respond
 from ml_kem_braid.attestation.policy import IdentityPolicy, SgxPolicy
-from ml_kem_braid.attestation.session import attested_connect
+from ml_kem_braid.attestation.session import attested_connect, responder_handshake
 
 __all__ = [
     "AttestationVerifier", "check_channel_binding", "Claims",
     "IdentityProver", "IdentityVerifier", "IDENTITY_CTX",
     "DcapVerifier", "Quote", "parse_quote",
     "IdentityPolicy", "SgxPolicy",
-    "SecureChannel", "nkhfs_initiate", "nkhfs_respond", "attested_connect",
+    "SecureChannel", "nkhfs_initiate", "nkhfs_respond", "attested_connect", "responder_handshake",
     "AttestationError", "QuoteParseError", "TrustAnchorError", "PolicyViolation",
     "ChannelBindingError", "ClaimsMismatch", "SignatureInvalid", "HandshakeError",
 ]

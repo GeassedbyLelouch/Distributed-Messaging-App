@@ -5,7 +5,7 @@ from ml_kem_braid.attestation import (
     attested_connect, IdentityProver, IdentityVerifier, IdentityPolicy,
 )
 from ml_kem_braid.attestation import noise
-from ml_kem_braid.attestation.errors import ChannelBindingError, SignatureInvalid
+from ml_kem_braid.attestation.errors import PolicyViolation
 
 def test_end_to_end_identity_attested_channel():
     # Responder identity + Noise static == the attested channel key.
@@ -34,7 +34,6 @@ def test_mitm_substituting_static_key_is_rejected():
     ik_pub = xeddsa.public_key(ik_priv)
     s_priv, s_pub = noise.x25519_keypair()
     a_priv, a_pub = noise.x25519_keypair()  # attacker static
-    genuine = IdentityProver(ik_priv).attest(s_pub, {"device_id": 1})
     # Attacker tries to pass evidence but terminate the Noise handshake themselves.
     forged = IdentityProver(xeddsa.generate_identity()).attest(a_pub, {"device_id": 1})
 
@@ -42,6 +41,6 @@ def test_mitm_substituting_static_key_is_rejected():
         msg2, _ = noise.nkhfs_respond(a_priv, msg1)
         return msg2
 
-    # Using the forged evidence: subject is not the trusted identity -> rejected.
-    with pytest.raises(Exception):
+    # verify rejects (subject != trusted identity) BEFORE nkhfs_initiate, so send_msg1 is intentionally never invoked.
+    with pytest.raises(PolicyViolation):
         attested_connect(forged, IdentityVerifier(), IdentityPolicy(ik_pub), send_msg1=send_msg1)

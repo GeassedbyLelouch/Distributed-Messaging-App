@@ -10,14 +10,10 @@ while True:
   line = input("Hello! What would you like to send today? Type quit if you wish to exit: ")
   if line.lower() == 'quit':
     print("Exited")
+    final_line = protocol.encode({
+    "Hello from node": line    
+    })
+    s.sendall(final_line)
     break
-
-
-
-final_line = protocol.encode({
-  "Hello from node": line    
-})
-
-s.sendall(final_line)
 
 s.close()

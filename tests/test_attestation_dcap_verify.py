@@ -50,7 +50,8 @@ def _pub_raw(key) -> bytes:
 
 def _build_evidence(claims: Claims, *, mr_enclave, mr_signer, isv_svn,
                     root_key, pck_key, attest_key, break_chain=False,
-                    wrong_report_data=False, wrong_attest=False):
+                    wrong_report_data=False, wrong_attest=False,
+                    bad_qe_sig=False, bad_report_sig=False):
     # --- root + PCK certs ---
     root = _cert("Test SGX Root", x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test SGX Root")]),
                  root_key, root_key.public_key(), ca=True)
@@ -74,6 +75,8 @@ def _build_evidence(claims: Claims, *, mr_enclave, mr_signer, isv_svn,
     attest_pub = _pub_raw(attest_key)
     header = bytearray(48); header[0:2] = struct.pack("<H", 3); header = bytes(header)
     signature = _sign_raw(attest_key, header + report)
+    if bad_report_sig:
+        signature = bytes([signature[0] ^ 0x01]) + signature[1:]
 
     # --- QE report binds attest key ---
     qe_report = bytearray(384)
@@ -82,6 +85,8 @@ def _build_evidence(claims: Claims, *, mr_enclave, mr_signer, isv_svn,
     qe_report[320:352] = qe_bind
     qe_report = bytes(qe_report)
     qe_report_sig = _sign_raw(pck_key, qe_report)
+    if bad_qe_sig:
+        qe_report_sig = bytes([qe_report_sig[0] ^ 0x01]) + qe_report_sig[1:]
 
     blob = header + report + struct.pack("<I", 64) + signature + attest_pub
     blob += qe_report + qe_report_sig + struct.pack("<H", len(qe_auth)) + qe_auth
@@ -152,4 +157,40 @@ def test_wrong_pinned_root_rejected():
     policy = SgxPolicy(pinned_root_der=other_root.public_bytes(serialization.Encoding.DER),
                        mrenclave_allow=frozenset({b"\x01" * 32}), mrsigner_allow=frozenset(), min_isv_svn=3)
     with pytest.raises(TrustAnchorError):
+        DcapVerifier().verify(ev, channel_key=b"\x33" * 32, policy=policy)
+
+
+def test_bad_qe_report_sig_rejected():
+    root_key, pck_key, attest_key = _keys()
+    claims = _claims()
+    ev, root = _build_evidence(claims, mr_enclave=b"\x01" * 32, mr_signer=b"\x02" * 32,
+                               isv_svn=5, root_key=root_key, pck_key=pck_key,
+                               attest_key=attest_key, bad_qe_sig=True)
+    policy = SgxPolicy(pinned_root_der=root.public_bytes(serialization.Encoding.DER),
+                       mrenclave_allow=frozenset({b"\x01" * 32}), mrsigner_allow=frozenset(), min_isv_svn=3)
+    with pytest.raises(TrustAnchorError):
+        DcapVerifier().verify(ev, channel_key=b"\x33" * 32, policy=policy)
+
+
+def test_qe_binding_mismatch_rejected():
+    root_key, pck_key, attest_key = _keys()
+    claims = _claims()
+    ev, root = _build_evidence(claims, mr_enclave=b"\x01" * 32, mr_signer=b"\x02" * 32,
+                               isv_svn=5, root_key=root_key, pck_key=pck_key,
+                               attest_key=attest_key, wrong_attest=True)
+    policy = SgxPolicy(pinned_root_der=root.public_bytes(serialization.Encoding.DER),
+                       mrenclave_allow=frozenset({b"\x01" * 32}), mrsigner_allow=frozenset(), min_isv_svn=3)
+    with pytest.raises(TrustAnchorError):
+        DcapVerifier().verify(ev, channel_key=b"\x33" * 32, policy=policy)
+
+
+def test_forged_enclave_report_sig_rejected():
+    root_key, pck_key, attest_key = _keys()
+    claims = _claims()
+    ev, root = _build_evidence(claims, mr_enclave=b"\x01" * 32, mr_signer=b"\x02" * 32,
+                               isv_svn=5, root_key=root_key, pck_key=pck_key,
+                               attest_key=attest_key, bad_report_sig=True)
+    policy = SgxPolicy(pinned_root_der=root.public_bytes(serialization.Encoding.DER),
+                       mrenclave_allow=frozenset({b"\x01" * 32}), mrsigner_allow=frozenset(), min_isv_svn=3)
+    with pytest.raises(SignatureInvalid):
         DcapVerifier().verify(ev, channel_key=b"\x33" * 32, policy=policy)

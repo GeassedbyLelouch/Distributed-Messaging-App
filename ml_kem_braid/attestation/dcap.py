@@ -9,15 +9,36 @@ verifies to a PINNED Intel root, and report_data binds the claims.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import struct
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
-from ml_kem_braid.attestation.errors import QuoteParseError
+from cryptography import x509
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+
+from ml_kem_braid.attestation.base import check_channel_binding
+from ml_kem_braid.attestation.claims import Claims
+from ml_kem_braid.attestation.errors import (
+    ClaimsMismatch,
+    PolicyViolation,
+    QuoteParseError,
+    SignatureInvalid,
+    TrustAnchorError,
+)
+from ml_kem_braid.attestation.identity import _parse_canonical_claims
+from ml_kem_braid.attestation.policy import SgxPolicy
 
 _HEADER_LEN = 48
 _REPORT_LEN = 384
 _SIG_LEN = 64
 _PUB_LEN = 64
+
+_EV_HDR = struct.Struct(">I")
 
 
 @dataclass
@@ -87,31 +108,6 @@ def parse_quote(blob: bytes) -> Quote:
         raise QuoteParseError("malformed quote") from exc
 
 
-# --- DcapVerifier (appended) ---
-
-import hashlib
-import hmac
-
-from cryptography import x509
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
-
-from ml_kem_braid.attestation.base import check_channel_binding
-from ml_kem_braid.attestation.claims import Claims
-from ml_kem_braid.attestation.errors import (
-    ClaimsMismatch,
-    PolicyViolation,
-    SignatureInvalid,
-    TrustAnchorError,
-)
-from ml_kem_braid.attestation.identity import _parse_canonical_claims
-from ml_kem_braid.attestation.policy import SgxPolicy
-
-_EV_HDR = struct.Struct(">I")
-
-
 def _raw64_to_der(sig: bytes) -> bytes:
     if len(sig) != 64:
         raise SignatureInvalid("bad ECDSA signature length")
@@ -129,7 +125,7 @@ def _p256_pub_from_raw(raw: bytes) -> ec.EllipticCurvePublicKey:
 def _ecdsa_verify(pub: ec.EllipticCurvePublicKey, sig64: bytes, msg: bytes, err) -> None:
     try:
         pub.verify(_raw64_to_der(sig64), msg, ec.ECDSA(hashes.SHA256()))
-    except (InvalidSignature, ValueError) as exc:
+    except (InvalidSignature, ValueError, TypeError) as exc:
         raise err("ECDSA verification failed") from exc
 
 
@@ -142,7 +138,10 @@ def _load_pem_chain(pem: bytes) -> list[x509.Certificate]:
         if end == -1:
             break
         block = pem[idx:end + len(marker)] + b"\n"
-        certs.append(x509.load_pem_x509_certificate(block))
+        try:
+            certs.append(x509.load_pem_x509_certificate(block))
+        except ValueError as exc:
+            raise TrustAnchorError("malformed PCK certificate") from exc
         idx = end + len(marker)
     if not certs:
         raise TrustAnchorError("empty PCK chain")
@@ -150,7 +149,14 @@ def _load_pem_chain(pem: bytes) -> list[x509.Certificate]:
 
 
 class DcapVerifier:
-    """SGX-DCAP ECDSA quote-v3 verifier (verify-only, offline pinned collateral)."""
+    """SGX-DCAP ECDSA quote-v3 verifier (verify-only, offline pinned collateral).
+
+    Validity windows ARE enforced: every certificate in the PCK chain must be
+    currently valid (not_valid_before_utc <= now <= not_valid_after_utc).
+
+    Certificate revocation (CRL/OCSP) is intentionally NOT checked in this
+    offline pinned-collateral model.
+    """
 
     kind = "sgx-dcap"
 
@@ -159,7 +165,7 @@ class DcapVerifier:
             raise ClaimsMismatch("evidence too short")
         (clen,) = _EV_HDR.unpack(evidence[: _EV_HDR.size])
         rest = evidence[_EV_HDR.size:]
-        if clen <= 0 or len(rest) < clen:
+        if clen == 0 or len(rest) < clen:
             raise ClaimsMismatch("evidence framing invalid")
         canonical = rest[:clen]
         quote_blob = rest[clen:]
@@ -177,6 +183,10 @@ class DcapVerifier:
 
         # (3) PCK chain -> pinned root.
         chain = _load_pem_chain(quote.pck_chain_pem)
+        now = datetime.now(timezone.utc)
+        for cert in chain:
+            if not (cert.not_valid_before_utc <= now <= cert.not_valid_after_utc):
+                raise TrustAnchorError("PCK certificate outside validity window")
         leaf, root = chain[0], chain[-1]
         pinned = x509.load_der_x509_certificate(policy.pinned_root_der)
         pinned_spki = pinned.public_key().public_bytes(
@@ -197,7 +207,7 @@ class DcapVerifier:
                     chain[i].signature, chain[i].tbs_certificate_bytes,
                     ec.ECDSA(chain[i].signature_hash_algorithm),
                 )
-            except InvalidSignature as exc:
+            except (InvalidSignature, ValueError, TypeError) as exc:
                 raise TrustAnchorError("PCK chain link invalid") from exc
 
         # (4) PCK leaf signs the QE report.

@@ -18,10 +18,11 @@ def test_wrong_static_key_breaks_handshake():
     _, s_pub = noise.x25519_keypair()
     other_priv, _ = noise.x25519_keypair()
     msg1, pending = noise.nkhfs_initiate(s_pub)
-    # responder holds a DIFFERENT static key than the initiator encrypted to
-    msg2, _ = noise.nkhfs_respond(other_priv, msg1)
+    # Standard Noise NK: the responder AEAD-authenticates msg1 under the es DH.
+    # A responder holding a DIFFERENT static key than the initiator encrypted to
+    # cannot verify msg1's tag, so it rejects immediately (before producing msg2).
     with pytest.raises(HandshakeError):
-        pending.finalize(msg2)
+        noise.nkhfs_respond(other_priv, msg1)
 
 def test_tampered_kem_ciphertext_breaks_handshake():
     s_priv, s_pub = noise.x25519_keypair()

@@ -207,7 +207,7 @@ def nkhfs_respond(
     ss.mix_hash(e_pub)
     ss.mix_key(_dh(responder_static_priv, e_pub))
     ss.mix_hash(kem_ek)
-    ss.mix_hash(tag1)  # mix tag1 into transcript; auth failure propagates to initiator's finalize
+    ss.decrypt_and_hash(tag1)  # AEAD-verify msg1; wrong static key -> InvalidTag -> HandshakeError here
     re_priv, re_pub = _eph if _eph is not None else x25519_keypair()
     ss.mix_hash(re_pub)
     ss.mix_key(_dh(re_priv, e_pub))

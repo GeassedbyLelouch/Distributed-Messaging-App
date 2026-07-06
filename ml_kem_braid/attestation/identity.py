@@ -3,6 +3,8 @@
 channel-bound claims set. Reuses sub-project-1 domain-separated signing."""
 from __future__ import annotations
 
+import hmac
+import json
 import struct
 from typing import Any, Mapping
 
@@ -48,7 +50,7 @@ class IdentityVerifier:
             raise ClaimsMismatch("evidence too short")
         (clen,) = _HDR.unpack(evidence[: _HDR.size])
         body = evidence[_HDR.size:]
-        if clen <= 0 or len(body) != clen + xeddsa.SIGNATURE_SIZE:
+        if clen == 0 or len(body) != clen + xeddsa.SIGNATURE_SIZE:
             raise ClaimsMismatch("evidence framing invalid")
         canonical = body[:clen]
         sig = body[clen:]
@@ -58,7 +60,6 @@ class IdentityVerifier:
         if not xeddsa.verify_ctx(claims.subject, IDENTITY_CTX, canonical, sig):
             raise SignatureInvalid("identity claims signature invalid")
         # The subject must be the policy's trusted identity (constant-time).
-        import hmac
         if not hmac.compare_digest(claims.subject, policy.trusted_identity):
             raise PolicyViolation("identity not trusted by policy")
         # Recomputed canonical must match (defends against non-canonical encodings).
@@ -69,8 +70,6 @@ class IdentityVerifier:
 
 
 def _parse_canonical_claims(canonical: bytes) -> Claims:
-    import json
-
     try:
         obj = json.loads(canonical.decode("utf-8"))
         return Claims(

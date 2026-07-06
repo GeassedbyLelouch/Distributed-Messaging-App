@@ -1,7 +1,10 @@
 # tests/test_attestation_identity.py
+import json
+import struct
+
 import pytest
 from ml_kem_braid.crypto import xeddsa
-from ml_kem_braid.attestation.identity import IdentityProver, IdentityVerifier
+from ml_kem_braid.attestation.identity import IdentityProver, IdentityVerifier, IDENTITY_CTX
 from ml_kem_braid.attestation.policy import IdentityPolicy
 from ml_kem_braid.attestation.errors import (
     SignatureInvalid, PolicyViolation, ChannelBindingError, ClaimsMismatch,
@@ -43,3 +46,17 @@ def test_truncated_evidence_rejected():
     _, pub, ck, ev = _setup()
     with pytest.raises((ClaimsMismatch, SignatureInvalid)):
         IdentityVerifier().verify(ev[:20], channel_key=ck, policy=IdentityPolicy(pub))
+
+def test_non_canonical_encoding_rejected():
+    priv = xeddsa.generate_identity()
+    pub = xeddsa.public_key(priv)
+    ck = b"\x33" * 32
+    # Semantically-valid claims, but NON-canonical JSON (reordered keys + loose separators).
+    non_canon = json.dumps(
+        {"subject": pub.hex(), "channel_key": ck.hex(), "attributes": {"device_id": 1}},
+        separators=(", ", ": "),
+    ).encode()
+    sig = xeddsa.sign_ctx(priv, IDENTITY_CTX, non_canon)  # sign the non-canonical bytes
+    evidence = struct.pack(">I", len(non_canon)) + non_canon + sig
+    with pytest.raises(ClaimsMismatch):
+        IdentityVerifier().verify(evidence, channel_key=ck, policy=IdentityPolicy(pub))

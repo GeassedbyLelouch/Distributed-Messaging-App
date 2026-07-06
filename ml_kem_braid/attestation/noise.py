@@ -11,7 +11,13 @@ import hmac
 from dataclasses import dataclass
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.asymmetric.x25519 import (
+    X25519PrivateKey,
+    X25519PublicKey,
+)
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from kyber_py.ml_kem import ML_KEM_1024
 
 from ml_kem_braid.attestation.errors import HandshakeError
 
@@ -121,17 +127,6 @@ class SecureChannel:
         return self.recv.decrypt_with_ad(ad, ct)
 
 
-# --- append to ml_kem_braid/attestation/noise.py ---
-
-from dataclasses import dataclass as _dataclass
-
-from cryptography.hazmat.primitives.asymmetric.x25519 import (
-    X25519PrivateKey,
-    X25519PublicKey,
-)
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-from kyber_py.ml_kem import ML_KEM_1024
-
 PROTOCOL_NAME = b"Noise_NKhfs_25519+MLKEM1024_ChaChaPoly_SHA256"
 _DH_LEN = 32
 _KEM_EK_LEN = 1568   # ML-KEM-1024 encapsulation key
@@ -149,7 +144,7 @@ def _dh(priv: X25519PrivateKey, pub: bytes) -> bytes:
     return priv.exchange(X25519PublicKey.from_public_bytes(pub))
 
 
-@_dataclass
+@dataclass
 class _InitiatorPending:
     ss: _SymmetricState
     e_priv: X25519PrivateKey

@@ -119,3 +119,103 @@ class SecureChannel:
 
     def decrypt(self, ct: bytes, ad: bytes = b"") -> bytes:
         return self.recv.decrypt_with_ad(ad, ct)
+
+
+# --- append to ml_kem_braid/attestation/noise.py ---
+
+from dataclasses import dataclass as _dataclass
+
+from cryptography.hazmat.primitives.asymmetric.x25519 import (
+    X25519PrivateKey,
+    X25519PublicKey,
+)
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from kyber_py.ml_kem import ML_KEM_1024
+
+PROTOCOL_NAME = b"Noise_NKhfs_25519+MLKEM1024_ChaChaPoly_SHA256"
+_DH_LEN = 32
+_KEM_EK_LEN = 1568   # ML-KEM-1024 encapsulation key
+_KEM_CT_LEN = 1568   # ML-KEM-1024 ciphertext
+_TAG = 16
+
+
+def x25519_keypair() -> tuple[X25519PrivateKey, bytes]:
+    priv = X25519PrivateKey.generate()
+    pub = priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return priv, pub
+
+
+def _dh(priv: X25519PrivateKey, pub: bytes) -> bytes:
+    return priv.exchange(X25519PublicKey.from_public_bytes(pub))
+
+
+@_dataclass
+class _InitiatorPending:
+    ss: _SymmetricState
+    e_priv: X25519PrivateKey
+    kem_dk: bytes
+
+    def finalize(self, msg2: bytes) -> SecureChannel:
+        if len(msg2) != _DH_LEN + _KEM_CT_LEN + _TAG:
+            raise HandshakeError("bad msg2 length")
+        re_pub = msg2[:_DH_LEN]
+        kem_ct = msg2[_DH_LEN:_DH_LEN + _KEM_CT_LEN]
+        tag = msg2[_DH_LEN + _KEM_CT_LEN:]
+        self.ss.mix_hash(re_pub)
+        self.ss.mix_key(_dh(self.e_priv, re_pub))
+        self.ss.mix_hash(kem_ct)
+        kem_ss = ML_KEM_1024.decaps(self.kem_dk, kem_ct)
+        self.ss.mix_key(kem_ss)
+        self.ss.decrypt_and_hash(tag)  # raises HandshakeError on auth failure
+        c_send, c_recv = self.ss.split()
+        return SecureChannel(c_send, c_recv, self.ss.handshake_hash)
+
+
+def nkhfs_initiate(
+    responder_static_pub: bytes, *, prologue: bytes = b"", _eph=None, _kem=None
+) -> tuple[bytes, _InitiatorPending]:
+    """Initiator (client) side. `responder_static_pub` is the ATTESTED static key.
+    _eph / _kem allow tests to inject the ephemeral X25519 keypair / ML-KEM keypair."""
+    if len(responder_static_pub) != _DH_LEN:
+        raise HandshakeError("bad responder static key length")
+    ss = _SymmetricState(PROTOCOL_NAME)
+    ss.mix_hash(prologue)
+    ss.mix_hash(responder_static_pub)  # NK pre-message: responder static
+    e_priv, e_pub = _eph if _eph is not None else x25519_keypair()
+    kem_ek, kem_dk = _kem if _kem is not None else ML_KEM_1024.keygen()
+    ss.mix_hash(e_pub)
+    ss.mix_key(_dh(e_priv, responder_static_pub))
+    ss.mix_hash(kem_ek)
+    tag1 = ss.encrypt_and_hash(b"")  # 16-byte tag over empty payload (cipher exists after mix_key)
+    msg1 = e_pub + kem_ek + tag1
+    return msg1, _InitiatorPending(ss=ss, e_priv=e_priv, kem_dk=kem_dk)
+
+
+def nkhfs_respond(
+    responder_static_priv: X25519PrivateKey, msg1: bytes, *, prologue: bytes = b"", _eph=None
+) -> tuple[bytes, SecureChannel]:
+    """Responder (server/enclave) side. Consumes msg1, returns (msg2, channel)."""
+    if len(msg1) != _DH_LEN + _KEM_EK_LEN + _TAG:
+        raise HandshakeError("bad msg1 length")
+    e_pub = msg1[:_DH_LEN]
+    kem_ek = msg1[_DH_LEN:_DH_LEN + _KEM_EK_LEN]
+    tag1 = msg1[_DH_LEN + _KEM_EK_LEN:]
+    s_pub = responder_static_priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    ss = _SymmetricState(PROTOCOL_NAME)
+    ss.mix_hash(prologue)
+    ss.mix_hash(s_pub)
+    ss.mix_hash(e_pub)
+    ss.mix_key(_dh(responder_static_priv, e_pub))
+    ss.mix_hash(kem_ek)
+    ss.mix_hash(tag1)  # mix tag1 into transcript; auth failure propagates to initiator's finalize
+    re_priv, re_pub = _eph if _eph is not None else x25519_keypair()
+    ss.mix_hash(re_pub)
+    ss.mix_key(_dh(re_priv, e_pub))
+    kem_ss, kem_ct = ML_KEM_1024.encaps(kem_ek)
+    ss.mix_hash(kem_ct)
+    ss.mix_key(kem_ss)
+    tag = ss.encrypt_and_hash(b"")  # 16-byte tag over empty payload
+    msg2 = re_pub + kem_ct + tag
+    c_send, c_recv = ss.split()
+    # responder's directions are swapped relative to the initiator
+    return msg2, SecureChannel(c_recv, c_send, ss.handshake_hash)

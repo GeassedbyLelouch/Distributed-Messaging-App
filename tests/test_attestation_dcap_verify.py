@@ -3,6 +3,7 @@
 rooted at a test root, then pin that root. This exercises the verification LOGIC
 without real Intel collateral (documented limitation)."""
 import hashlib
+import json
 import struct
 import pytest
 
@@ -32,14 +33,20 @@ def _raw64(sig_der: bytes) -> bytes:
 def _sign_raw(key, msg: bytes) -> bytes:
     return _raw64(key.sign(msg, ec.ECDSA(hashes.SHA256())))
 
-def _cert(subject, issuer_name, issuer_key, pub, ca=False):
+def _cert(subject, issuer_name, issuer_key, pub, ca=False, expired=False):
+    if expired:
+        nvb = datetime.now(UTC) - timedelta(days=400)
+        nva = datetime.now(UTC) - timedelta(days=1)
+    else:
+        nvb = datetime.now(UTC) - timedelta(days=1)
+        nva = datetime.now(UTC) + timedelta(days=365)
     b = (x509.CertificateBuilder()
          .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, subject)]))
          .issuer_name(issuer_name)
          .public_key(pub)
          .serial_number(x509.random_serial_number())
-         .not_valid_before(datetime.now(UTC) - timedelta(days=1))
-         .not_valid_after(datetime.now(UTC) + timedelta(days=365)))
+         .not_valid_before(nvb)
+         .not_valid_after(nva))
     if ca:
         b = b.add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
     return b.sign(issuer_key, hashes.SHA256())
@@ -51,12 +58,12 @@ def _pub_raw(key) -> bytes:
 def _build_evidence(claims: Claims, *, mr_enclave, mr_signer, isv_svn,
                     root_key, pck_key, attest_key, break_chain=False,
                     wrong_report_data=False, wrong_attest=False,
-                    bad_qe_sig=False, bad_report_sig=False):
+                    bad_qe_sig=False, bad_report_sig=False, expired_pck=False):
     # --- root + PCK certs ---
     root = _cert("Test SGX Root", x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test SGX Root")]),
                  root_key, root_key.public_key(), ca=True)
     signer_key = ec.generate_private_key(P256) if break_chain else root_key
-    pck = _cert("PCK", root.subject, signer_key, pck_key.public_key(), ca=False)
+    pck = _cert("PCK", root.subject, signer_key, pck_key.public_key(), ca=False, expired=expired_pck)
     pck_pem = pck.public_bytes(serialization.Encoding.PEM) + root.public_bytes(serialization.Encoding.PEM)
 
     # --- enclave report ---
@@ -194,3 +201,38 @@ def test_forged_enclave_report_sig_rejected():
                        mrenclave_allow=frozenset({b"\x01" * 32}), mrsigner_allow=frozenset(), min_isv_svn=3)
     with pytest.raises(SignatureInvalid):
         DcapVerifier().verify(ev, channel_key=b"\x33" * 32, policy=policy)
+
+
+def test_expired_pck_cert_rejected():
+    root_key, pck_key, attest_key = _keys()
+    claims = _claims()
+    ev, root = _build_evidence(claims, mr_enclave=b"\x01" * 32, mr_signer=b"\x02" * 32,
+                               isv_svn=5, root_key=root_key, pck_key=pck_key,
+                               attest_key=attest_key, expired_pck=True)
+    policy = SgxPolicy(pinned_root_der=root.public_bytes(serialization.Encoding.DER),
+                       mrenclave_allow=frozenset({b"\x01" * 32}), mrsigner_allow=frozenset(), min_isv_svn=3)
+    with pytest.raises(TrustAnchorError):
+        DcapVerifier().verify(ev, channel_key=b"\x33" * 32, policy=policy)
+
+
+def test_dcap_non_canonical_claims_rejected():
+    ck = b"\x33" * 32
+    subj = b"\xaa" * 32
+    non_canon = json.dumps(
+        {"subject": subj.hex(), "channel_key": ck.hex(), "attributes": {"tcb": 5}},
+        separators=(", ", ": "),
+    ).encode()
+    evidence = struct.pack(">I", len(non_canon)) + non_canon + b"\x00" * 10
+    policy = SgxPolicy(pinned_root_der=b"x" * 40, mrenclave_allow=frozenset({b"\x01" * 32}),
+                       mrsigner_allow=frozenset(), min_isv_svn=3)
+    with pytest.raises(ClaimsMismatch):
+        DcapVerifier().verify(evidence, channel_key=ck, policy=policy)
+
+
+def test_dcap_truncated_framing_rejected():
+    policy = SgxPolicy(pinned_root_der=b"x" * 40, mrenclave_allow=frozenset({b"\x01" * 32}),
+                       mrsigner_allow=frozenset(), min_isv_svn=3)
+    with pytest.raises(ClaimsMismatch):
+        DcapVerifier().verify(b"\x00\x00", channel_key=b"\x33" * 32, policy=policy)  # < header size
+    with pytest.raises(ClaimsMismatch):
+        DcapVerifier().verify(struct.pack(">I", 9999), channel_key=b"\x33" * 32, policy=policy)  # clen > body

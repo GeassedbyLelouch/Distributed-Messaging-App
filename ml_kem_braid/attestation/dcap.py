@@ -87,6 +87,8 @@ def parse_quote(blob: bytes) -> Quote:
         if len(report_raw) != _REPORT_LEN:
             raise QuoteParseError("truncated enclave report")
         (sig_len,) = struct.unpack_from("<I", blob, off); off += 4
+        if sig_len != _SIG_LEN:
+            raise QuoteParseError("unexpected signature data length")
         signature = blob[off:off + _SIG_LEN]; off += _SIG_LEN
         attest_pub = blob[off:off + _PUB_LEN]; off += _PUB_LEN
         qe_report = blob[off:off + _REPORT_LEN]; off += _REPORT_LEN
@@ -217,6 +219,8 @@ class DcapVerifier:
         qe_bind = hashlib.sha256(quote.attest_pub + quote.qe_auth_data).digest()
         if not hmac.compare_digest(quote.qe_report[320:352], qe_bind):
             raise TrustAnchorError("QE report does not bind the attestation key")
+        if quote.qe_report[352:384] != bytes(32):
+            raise TrustAnchorError("QE report_data has unexpected high bytes")
 
         # (6) attestation key signs the enclave report.
         attest_pub = _p256_pub_from_raw(quote.attest_pub)

@@ -92,17 +92,22 @@ def initial_message_from_dict(data: dict) -> InitialMessage:
 
 
 def braid_message_to_dict(msg: Message) -> dict:
+    # ``frame_mac`` authenticates the whole frame (type + epoch + length + payload)
+    # and MUST survive the JSON hop, or the receiver rejects every message.
     return {
         "epoch": msg.epoch,
         "type": msg.type.name,
         "data": b64e(msg.data) if msg.data is not None else None,
+        "frame_mac": b64e(msg.frame_mac) if msg.frame_mac is not None else None,
     }
 
 
 def braid_message_from_dict(data: dict) -> Message:
     raw: Optional[str] = data.get("data")
+    mac: Optional[str] = data.get("frame_mac")
     return Message(
         epoch=int(data["epoch"]),
         type=MessageType[data["type"]],
         data=b64d(raw) if raw else None,
+        frame_mac=b64d(mac) if mac else None,
     )

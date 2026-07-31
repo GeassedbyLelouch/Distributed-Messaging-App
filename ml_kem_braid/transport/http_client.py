@@ -31,14 +31,13 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import time
 from dataclasses import dataclass, field
 from queue import Queue
 from typing import AsyncIterator, Iterator, List, Optional, Tuple, TYPE_CHECKING
 
 from ml_kem_braid.protocol.messages import Message
+from ml_kem_braid.wire import braid_message_from_dict, braid_message_to_dict
 
 # HTTP client imports (optional dependencies)
 try:
@@ -154,30 +153,20 @@ class BraidHttpClient:
         return headers
     
     def _serialize_message(self, msg: Message) -> dict:
-        """Serialize message to JSON-compatible dict."""
-        result = {
-            "epoch": msg.epoch,
-            "type": msg.type.name,
-        }
-        if msg.data is not None:
-            result["data"] = base64.b64encode(msg.data).decode("ascii")
-        return result
-    
+        """Serialize message to JSON-compatible dict.
+
+        Delegates to :mod:`ml_kem_braid.wire`, the single JSON codec for Braid
+        frames, so this transport cannot drift from the client/server one. In
+        particular the ``frame_mac`` (audit M1) MUST survive the JSON hop: it is
+        mandatory on the receive path, so a codec that dropped it would reject
+        every honest frame.
+        """
+        return braid_message_to_dict(msg)
+
     def _deserialize_message(self, data: dict) -> Message:
-        """Deserialize message from JSON dict."""
-        from ml_kem_braid.protocol.messages import MessageType
-        
-        msg_type = MessageType[data["type"]]
-        msg_data = None
-        if "data" in data and data["data"]:
-            msg_data = base64.b64decode(data["data"])
-        
-        return Message(
-            epoch=data["epoch"],
-            type=msg_type,
-            data=msg_data
-        )
-    
+        """Deserialize message from JSON dict (see :meth:`_serialize_message`)."""
+        return braid_message_from_dict(data)
+
     async def exchange(self, msg: Message) -> Message:
         """
         Exchange a message with the peer (async).
@@ -309,37 +298,22 @@ class BraidServer:
         Returns:
             JSON response body
         """
-        from ml_kem_braid.protocol.messages import MessageType
-        
-        # Deserialize incoming message
-        msg_type = MessageType[data["type"]]
-        msg_data = None
-        if "data" in data and data["data"]:
-            msg_data = base64.b64decode(data["data"])
-        
-        msg = Message(
-            epoch=data["epoch"],
-            type=msg_type,
-            data=msg_data
-        )
-        
+        # Deserialize incoming message. Uses the shared wire codec so the frame
+        # MAC (audit M1) is preserved in both directions; a frame that lost its
+        # tag here would be indistinguishable from one an attacker stripped.
+        msg = braid_message_from_dict(data)
+
         # Store message
         self._messages.put(msg)
-        
+
         # Call handler if set
         response_msg = None
         if self.on_message:
             response_msg = self.on_message(msg)
-        
+
         # Return response
         if response_msg:
-            result = {
-                "epoch": response_msg.epoch,
-                "type": response_msg.type.name,
-            }
-            if response_msg.data:
-                result["data"] = base64.b64encode(response_msg.data).decode("ascii")
-            return result
+            return braid_message_to_dict(response_msg)
         else:
             return {"status": "received"}
     

@@ -25,8 +25,37 @@ Post-compromise security: a fresh epoch key advances the root key, providing
 break-in recovery proportional to the Braid SCKA's PCS guarantees.
 
 Out-of-order / dropped messages: up to MAX_SKIP message keys may be cached in
-``skipped[(epoch, index)] -> mk``. If more than MAX_SKIP keys would need to be
-cached, decryption refuses (prevents unbounded state growth under attack).
+``skipped[(epoch, index)] -> mk``. MAX_SKIP is BOTH the per-message catch-up bound
+and a GLOBAL bound on ``len(skipped)`` across all epochs (audit finding M3). Keys
+older than ``RETAINED_RECV_EPOCHS`` epochs are pruned on every ratchet.
+
+Skipped-key store: fail closed, do NOT evict (post-audit hardening D7)
+---------------------------------------------------------------------
+The first fix for M3 enforced the global bound by evicting the oldest
+``(epoch, index)`` entries. That converted a bounded-memory DoS into *permanent,
+silent loss of authentic traffic*: an on-path attacker who reorders or delays a
+message only has to make the receiver skip ahead ``MAX_SKIP`` more slots and the
+genuine delayed message becomes undecryptable forever, with no error anywhere.
+
+The store therefore now **refuses** to create skipped keys once the global bound
+would be exceeded, raising :class:`SkippedKeyLimitError` (a ``ValueError``). The
+DoS bound is preserved exactly — ``len(skipped) <= MAX_SKIP`` always — but the
+failure mode is a loud, recoverable rejection of the *new* message instead of the
+silent destruction of an *old* one. The trade-off: a peer that jumps far ahead
+while the store is saturated is refused until an epoch ratchet prunes stale
+entries (``_prune_stale``) or the cached keys are consumed by the messages they
+belong to. Refusing a message the receiver cannot serve without discarding
+authentic key material is the correct direction to fail.
+
+Cross-epoch reordering: the previous epoch's receive chain is retained for a bounded
+window so legitimately reordered messages from epoch N-1 still decrypt after
+ratcheting to epoch N (audit finding L8). Anything older is refused.
+
+Key hygiene (audit finding L5): Python ``bytes`` are immutable, so keys cannot be
+wiped in place. This module does a best-effort pass only — references to chain,
+root and message keys are dropped with ``del`` as soon as they are consumed, and no
+gratuitous copies are made. True zeroization is deferred to the Rust port, where
+chain-step functions consume keys by value and keys are ``Zeroizing<[u8; 32]>``.
 
 Reference: Signal Double Ratchet spec, sections 2 and 3.
     https://signal.org/docs/specifications/doubleratchet/
@@ -36,6 +65,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac as _hmac
+from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Dict, Optional, Tuple
@@ -43,13 +73,38 @@ from typing import Dict, Optional, Tuple
 from ml_kem_braid.core.kdf import hkdf
 
 # Maximum number of out-of-order message keys cached per ratchet state.
-# Exceeding this bound causes decrypt() to raise rather than allocating further.
+# This is both the per-decrypt catch-up bound AND the global bound on the total
+# size of the skipped-key store. Exceeding EITHER bound causes decrypt() to raise
+# (fail closed); no cached key is ever evicted to make room. See the module
+# docstring, "Skipped-key store: fail closed, do NOT evict".
 MAX_SKIP = 1000
+
+# How many *previous* epochs' receive chains / skipped keys are retained so that
+# legitimately reordered messages still decrypt (audit finding L8). Keep tight:
+# every retained epoch is attacker-reachable state, bounded overall by MAX_SKIP.
+RETAINED_RECV_EPOCHS = 1
 
 _HKDF_SALT_ZEROS = b"\x00" * 32
 _DR_ROOT_INFO = b"MLKEMBraid-DR-root"
 _INFO_ATOB = b"A->B"
 _INFO_BTOA = b"B->A"
+# Domain separator for the canonical AEAD associated-data encoding (L6).
+_AD_DOMAIN = b"MLKEMBraid-DR-ad-v2"
+
+
+class SkippedKeyLimitError(ValueError):
+    """The receiver refuses to cache more out-of-order message keys (D7).
+
+    Raised when honouring a message would push the skipped-key store past
+    ``MAX_SKIP``. The alternative — evicting the oldest cached key — silently
+    and permanently destroys an authentic message that has merely been delayed,
+    so this fails closed instead: the *new* message is rejected and every
+    already-cached key survives.
+
+    Subclasses :class:`ValueError` so callers that already handle the MAX_SKIP
+    catch-up rejection need no change; catch it specifically to surface
+    "too many messages outstanding, resynchronise" to the user.
+    """
 
 
 class Role(Enum):
@@ -155,8 +210,12 @@ class DoubleRatchet:
         self._n_send: int = 0           # messages sent in current epoch
         self._n_recv: int = 0           # next expected receive index in current epoch
         self._current_epoch: int = -1   # -1 = not yet ratcheted
-        # (epoch, index) -> message_key for out-of-order messages
-        self._skipped: Dict[Tuple[int, int], bytes] = {}
+        # (epoch, index) -> message_key for out-of-order messages.
+        # Insertion-ordered so the global cap can evict oldest-first.
+        self._skipped: "OrderedDict[Tuple[int, int], bytes]" = OrderedDict()
+        # Retained receive chains for recent past epochs (L8):
+        # epoch -> (chain_key, next_expected_index)
+        self._prev_recv: "OrderedDict[int, Tuple[bytes, int]]" = OrderedDict()
 
     # -- public API -----------------------------------------------------------
 
@@ -169,6 +228,10 @@ class DoubleRatchet:
         Raises ValueError if ``epoch`` is not strictly greater than the
         current epoch (idempotent calls are rejected to prevent accidental
         epoch rewinds).
+
+        The outgoing epoch's receive chain is retained for RETAINED_RECV_EPOCHS
+        so reordered messages still decrypt (L8); anything older, including its
+        skipped keys, is pruned (M3).
         """
         if epoch <= self._current_epoch:
             raise ValueError(
@@ -177,6 +240,11 @@ class DoubleRatchet:
             )
         self._rk, chain_seed = _kdf_rk(self._rk, epoch_key)
         ck_atob, ck_btoa = _derive_directional_chains(chain_seed)
+        del chain_seed  # best-effort hygiene (L5): drop the reference promptly
+
+        # Retain the outgoing receive chain for the bounded reordering window.
+        if self._ck_recv is not None and self._current_epoch >= 0:
+            self._prev_recv[self._current_epoch] = (self._ck_recv, self._n_recv)
 
         if self._role == Role.ALICE:
             self._ck_send = ck_atob
@@ -184,10 +252,12 @@ class DoubleRatchet:
         else:
             self._ck_send = ck_btoa
             self._ck_recv = ck_atob
+        del ck_atob, ck_btoa
 
         self._n_send = 0
         self._n_recv = 0
         self._current_epoch = epoch
+        self._prune_stale(epoch)
 
     def encrypt(self, plaintext: bytes, associated_data: bytes) -> Tuple[RatchetHeader, bytes]:
         """Encrypt ``plaintext`` and advance the sending chain.
@@ -201,10 +271,13 @@ class DoubleRatchet:
         self._ck_send, mk = _kdf_ck(self._ck_send)
         header = RatchetHeader(epoch=self._current_epoch, index=self._n_send)
         self._n_send += 1
-        # Bind the header into the AD
-        full_ad = associated_data + _header_bytes(header)
+        # Bind the header into the AD (canonical, length-prefixed: see _bind_ad)
+        full_ad = _bind_ad(associated_data, header)
         from ml_kem_braid.core.aead import aead_encrypt
         ct = aead_encrypt(mk, plaintext, full_ad)
+        # Best-effort key hygiene (L5): drop the message key immediately. Python
+        # bytes are immutable so the buffer cannot be wiped; see module docstring.
+        del mk
         return header, ct
 
     def decrypt(self, header: RatchetHeader, ciphertext: bytes, associated_data: bytes) -> bytes:
@@ -216,6 +289,10 @@ class DoubleRatchet:
           - ValueError    : if header.epoch is in the future (caller must
                             ratchet_epoch first once the SCKA agrees it)
           - ValueError    : if MAX_SKIP would be exceeded to catch up to header.index
+          - SkippedKeyLimitError : if caching the catch-up keys would push the
+                            skipped-key store past its GLOBAL MAX_SKIP bound. The
+                            store fails closed (this message is refused); it never
+                            evicts an already-cached authentic key (D7).
           - cryptography.exceptions.InvalidTag : on AEAD authentication failure
         """
         if self._ck_recv is None:
@@ -226,7 +303,7 @@ class DoubleRatchet:
                 f"(current epoch {self._current_epoch}); "
                 "call ratchet_epoch() first"
             )
-        full_ad = associated_data + _header_bytes(header)
+        full_ad = _bind_ad(associated_data, header)
 
         # Try the skipped-key cache first (out-of-order or previously skipped).
         # Verify the AEAD BEFORE evicting the cached key: a forged ciphertext that
@@ -238,50 +315,122 @@ class DoubleRatchet:
             mk = self._skipped[key]
             plaintext = aead_decrypt(mk, ciphertext, full_ad)  # raises before eviction
             del self._skipped[key]
+            del mk  # best-effort hygiene (L5)
             return plaintext
 
         if header.epoch < self._current_epoch:
-            # Past epoch not in the cache — unrecoverable
-            raise ValueError(
-                f"decrypt: no cached key for epoch {header.epoch} "
-                f"index {header.index}"
+            # A retained past epoch (bounded reordering window, L8) can still be
+            # caught up; anything older is unrecoverable.
+            retained = self._prev_recv.get(header.epoch)
+            if retained is None:
+                raise ValueError(
+                    f"decrypt: no cached key for epoch {header.epoch} "
+                    f"index {header.index}"
+                )
+            ck_start, n_recv = retained
+            plaintext, ck_next, new_skipped = self._walk_and_open(
+                header.epoch, header.index, n_recv, ck_start, ciphertext, full_ad
             )
+            # Commit only after successful authentication.
+            self._commit_skipped(new_skipped)
+            self._prev_recv[header.epoch] = (ck_next, header.index + 1)
+            return plaintext
 
         # header.epoch == self._current_epoch
-        # Skip-ahead: cache intermediate message keys up to header.index
-        if header.index < self._n_recv:
+        plaintext, ck_next, new_skipped = self._walk_and_open(
+            self._current_epoch,
+            header.index,
+            self._n_recv,
+            self._ck_recv,
+            ciphertext,
+            full_ad,
+        )
+
+        # Commit state only after successful authentication.
+        self._commit_skipped(new_skipped)
+        self._ck_recv = ck_next
+        self._n_recv = header.index + 1
+        return plaintext
+
+    # -- internal helpers -----------------------------------------------------
+
+    def _walk_and_open(
+        self,
+        epoch: int,
+        index: int,
+        n_recv: int,
+        ck_start: bytes,
+        ciphertext: bytes,
+        full_ad: bytes,
+    ) -> Tuple[bytes, bytes, Dict[Tuple[int, int], bytes]]:
+        """Walk a receive chain to ``index``, staging (not committing) all state.
+
+        Returns ``(plaintext, next_chain_key, staged_skipped_keys)``. Raises before
+        any state is committed if the catch-up would exceed MAX_SKIP or if the
+        AEAD fails, so a forged message cannot advance ratchet state.
+        """
+        if index < n_recv:
             raise ValueError(
-                f"decrypt: index {header.index} already consumed "
-                f"(n_recv={self._n_recv})"
+                f"decrypt: index {index} already consumed (n_recv={n_recv})"
             )
-        skip_count = header.index - self._n_recv
+        skip_count = index - n_recv
         if skip_count > MAX_SKIP:
             raise ValueError(
                 f"decrypt: would skip {skip_count} messages (MAX_SKIP={MAX_SKIP}); "
                 "refusing to cache that many keys"
             )
+        # GLOBAL bound, checked before any key material is derived or any AEAD is
+        # attempted: fail closed rather than evicting authentic cached keys (D7).
+        if len(self._skipped) + skip_count > MAX_SKIP:
+            raise SkippedKeyLimitError(
+                f"decrypt: caching {skip_count} more skipped keys would exceed the "
+                f"global bound (have {len(self._skipped)}, MAX_SKIP={MAX_SKIP}); "
+                "refusing rather than discarding already-cached authentic keys — "
+                "consume outstanding messages or ratchet to a new epoch first"
+            )
 
-        # Walk the chain from n_recv to header.index, staging all state changes.
-        # We commit to _ck_recv / _n_recv / _skipped only AFTER successful AEAD
-        # so a forged message cannot advance ratchet state.
-        ck = self._ck_recv
+        ck = ck_start
         new_skipped: Dict[Tuple[int, int], bytes] = {}
-        for i in range(self._n_recv, header.index):
+        for i in range(n_recv, index):
             ck, mk_skip = _kdf_ck(ck)
-            new_skipped[(self._current_epoch, i)] = mk_skip
+            new_skipped[(epoch, i)] = mk_skip
 
-        # Derive the actual message key for header.index
         ck_next, mk = _kdf_ck(ck)
+        del ck
 
         # Attempt AEAD; raises on tamper — no state has been committed yet.
         from ml_kem_braid.core.aead import aead_decrypt
         plaintext = aead_decrypt(mk, ciphertext, full_ad)
+        del mk  # best-effort hygiene (L5)
+        return plaintext, ck_next, new_skipped
 
-        # Commit state only after successful authentication.
-        self._skipped.update(new_skipped)
-        self._ck_recv = ck_next
-        self._n_recv = header.index + 1
-        return plaintext
+    def _commit_skipped(self, new_skipped: Dict[Tuple[int, int], bytes]) -> None:
+        """Insert staged skipped keys, enforcing the GLOBAL cap (audit M3 / D7).
+
+        MAX_SKIP bounds the per-decrypt catch-up; this bounds the cumulative
+        store, which a peer sending at sparse ascending indices otherwise grew
+        without limit.
+
+        The cap is enforced by REFUSAL, never by eviction. :meth:`_walk_and_open`
+        already rejects a message whose catch-up would overflow the store, so
+        reaching the guard here means an invariant broke; raising keeps the
+        failure loud instead of silently dropping an authentic cached key.
+        """
+        if len(self._skipped) + len(new_skipped) > MAX_SKIP:
+            raise SkippedKeyLimitError(
+                f"skipped-key store would exceed MAX_SKIP={MAX_SKIP}; refusing "
+                "to evict authentic cached keys"
+            )
+        for k, v in new_skipped.items():
+            self._skipped[k] = v
+
+    def _prune_stale(self, current_epoch: int) -> None:
+        """Drop receive chains and skipped keys outside the retention window."""
+        oldest = current_epoch - RETAINED_RECV_EPOCHS
+        for ep in [e for e in self._prev_recv if e < oldest]:
+            del self._prev_recv[ep]
+        for k in [k for k in self._skipped if k[0] < oldest]:
+            del self._skipped[k]
 
     # -- test hook ------------------------------------------------------------
 
@@ -301,9 +450,30 @@ class DoubleRatchet:
 # ---------------------------------------------------------------------------
 
 def _header_bytes(header: RatchetHeader) -> bytes:
-    """Encode header as canonical bytes for AD binding."""
+    """Encode header as canonical bytes for AD binding.
+
+    Fixed-width fields, so this component is self-delimiting.
+    """
     return (
         b"hdr:"
         + header.epoch.to_bytes(8, "big")
         + header.index.to_bytes(8, "big")
+    )
+
+
+def _bind_ad(associated_data: bytes, header: RatchetHeader) -> bytes:
+    """Canonical AEAD associated-data encoding (audit finding L6).
+
+    Previously ``associated_data + _header_bytes(header)`` — a raw concatenation
+    of a caller-controlled variable-length value with a fixed-width suffix. No
+    splice is exploitable today, but the encoding is not injective in general, so
+    the caller-supplied component is now explicitly length-prefixed:
+
+        AD_DOMAIN || u32(len(associated_data)) || associated_data || header_bytes
+    """
+    return (
+        _AD_DOMAIN
+        + len(associated_data).to_bytes(4, "big")
+        + associated_data
+        + _header_bytes(header)
     )

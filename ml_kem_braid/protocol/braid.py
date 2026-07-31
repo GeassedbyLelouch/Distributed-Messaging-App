@@ -36,7 +36,7 @@ from typing import List, Optional, Tuple
 
 from ml_kem_braid.core.ml_kem import MLKEM, MLKEMVariant
 from ml_kem_braid.core.kdf import KDF
-from ml_kem_braid.core.authenticator import Authenticator, MAC_SIZE
+from ml_kem_braid.core.authenticator import Authenticator, FrameRole, MAC_SIZE
 from ml_kem_braid.encoding.erasure import Encoder
 from ml_kem_braid.protocol.messages import Message
 from ml_kem_braid.protocol.states import (
@@ -126,8 +126,17 @@ class MLKEMBraid:
         self.kem = MLKEM(self.variant)
         self.kdf = KDF(self.protocol_info)
         
-        # Initialize authenticator with preshared secret
-        self.auth = Authenticator(self.protocol_info)
+        # Initialize authenticator with preshared secret. The frame role is
+        # derived from the Braid role so the two peers seal and verify wire
+        # frames under OPPOSITE directional keys — an attacker cannot reflect a
+        # party's own frame back at it (hardening D9).
+        self.auth = Authenticator(
+            self.protocol_info,
+            role=(
+                FrameRole.INITIATOR if self.role == Role.ALICE
+                else FrameRole.RESPONDER
+            ),
+        )
         self.auth.init(self.epoch, self._preshared_secret)
         
         # Initialize state based on role
@@ -163,10 +172,14 @@ class MLKEMBraid:
             kem=self.kem,
             kdf=self.kdf
         )
-        
+
+        # Seal the wire frame (type byte + epoch + length prefix + payload) so the
+        # receiver can refuse epoch/type-driven transitions from spoofed frames.
+        self._seal_frame(result.message)
+
         # Update state
         self.state = result.new_state
-        
+
         # Handle epoch advancement if we transitioned to certain states
         self._handle_epoch_advancement(result)
         
@@ -197,9 +210,16 @@ class MLKEMBraid:
             >>> if key:
             ...     print(f"Derived key for epoch {key[0]}")
         """
+        # Authenticate the ENTIRE wire frame BEFORE touching the state machine.
+        # `Ct2Sampled.receive` advances the epoch on any message whose `epoch`
+        # field is `epoch + 1`, and `epoch` is bound into every subsequent MAC,
+        # so an unauthenticated frame could permanently desync the session
+        # (audit finding M1). Verification failure leaves all state untouched.
+        self.auth.verify_frame(msg.mac_input(), msg.frame_mac)
+
         # Store old state before transition for epoch advancement check
         old_state = self.state
-        
+
         result = self.state.receive(
             msg=msg,
             epoch=self.epoch,
@@ -220,6 +240,18 @@ class MLKEMBraid:
         
         return result.receiving_epoch, result.output_key
     
+    def _seal_frame(self, msg: Message) -> Message:
+        """
+        Attach the wire-frame MAC to an outgoing message.
+
+        The MAC covers the canonical encoding of the whole frame (message type,
+        epoch, length prefix, payload) under the session-scoped frame key, so a
+        network attacker cannot inject or re-type a frame. Exposed (underscore
+        prefixed) so tests can model an in-session attacker.
+        """
+        msg.frame_mac = self.auth.mac_frame(msg.mac_input())
+        return msg
+
     def _handle_epoch_advancement(self, result: SendResult) -> None:
         """Handle epoch advancement after send transitions."""
         # Epoch advances when certain states are reached

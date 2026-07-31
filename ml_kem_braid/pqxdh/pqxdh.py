@@ -29,8 +29,11 @@ authenticator on both sides.
 
 from __future__ import annotations
 
+import hashlib
+import struct
+import threading
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Set, Tuple
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -191,6 +194,182 @@ def create_prekey_bundle(
 
 
 # ---------------------------------------------------------------------------
+# Handshake replay protection
+# ---------------------------------------------------------------------------
+
+# Bound on the number of *initiator identities* the guard tracks, and on the
+# number of accepted handshakes remembered per identity. Neither bound is ever
+# enforced by eviction: see :class:`ReplayCache`.
+MAX_REPLAY_INITIATORS = 4096
+MAX_REPLAY_PER_INITIATOR = 1024
+
+# Legacy alias (the guard's headline capacity) kept for existing importers.
+MAX_REPLAY_CACHE = MAX_REPLAY_INITIATORS
+
+_REPLAY_TAG = b"MLKEMBraid/pqxdh/replay/v2"
+
+
+class ReplayError(KeyError):
+    """A previously-seen :class:`InitialMessage` was presented again.
+
+    Subclasses :class:`KeyError` because the pre-existing one-time-prekey replay
+    signal is also a ``KeyError``; callers that already handle handshake replay
+    need no change.
+    """
+
+
+class ReplayGuardFull(ReplayError):
+    """The guard has no room to *prove* this handshake is fresh, so it is refused.
+
+    Raised instead of forgetting an older fingerprint. A security control that
+    silently evicts is not a control: an attacker who can push the victim's
+    record out of a fixed-capacity cache re-enables the exact replay the cache
+    was added to stop. This guard therefore fails **closed** — it degrades to
+    refusing *new* handshakes, never to accepting *old* ones.
+
+    Subclasses :class:`ReplayError` (hence :class:`KeyError`) so every existing
+    caller keeps failing closed without changes.
+    """
+
+
+class ReplayCache:
+    """Per-initiator, fail-closed store of accepted-handshake fingerprints.
+
+    Design (post-audit hardening of finding M2)
+    -------------------------------------------
+    The first version of this class was a single process-wide FIFO of at most
+    ``MAX_REPLAY_CACHE`` fingerprints that evicted oldest-first. That made it a
+    *fail-open eviction primitive*: ~4096 cheap messages pushed a victim's
+    fingerprint out and the original replay worked again. Three properties fix
+    that, in the order the governing principle prescribes:
+
+    1. **Cost is charged to the attacker.** :func:`responder_handshake` records a
+       fingerprint only *after* the whole handshake validates (key parsing, all
+       DH legs, one-time-prekey lookup and ML-KEM decapsulation). Malformed or
+       unusable handshakes never consume guard state at all, so the flood that
+       used to evict entries now costs the attacker everything and the guard
+       nothing.
+    2. **Partitioned per principal.** State is keyed by
+       ``(responder identity, initiator identity)``. One peer's traffic can never
+       displace another peer's records, and a fingerprint recorded for one
+       responder can never false-positive against a different responder in the
+       same process.
+    3. **Fail closed, never evict.** At either capacity bound the guard raises
+       :class:`ReplayGuardFull` for *new* fingerprints. Membership is checked
+       **before** the capacity check, so a full partition still detects (and
+       rejects) every replay it has already recorded.
+
+    What this does NOT provide: unbounded memory. A peer that legitimately runs
+    more than ``max_per_initiator`` handshakes against the same responder prekey
+    set will be refused until the responder rotates its signed prekeys (which
+    retires the derivable ``SK`` entirely) and clears the guard. That is a
+    deliberate availability-for-integrity trade.
+
+    Thread-safe: all mutation happens under an internal lock, so one guard may be
+    shared by concurrent responder threads.
+    """
+
+    __slots__ = ("_by_principal", "_max_initiators", "_max_per_initiator", "_lock")
+
+    def __init__(
+        self,
+        max_initiators: int = MAX_REPLAY_INITIATORS,
+        max_per_initiator: int = MAX_REPLAY_PER_INITIATOR,
+    ) -> None:
+        if max_initiators < 1:
+            raise ValueError("max_initiators must be >= 1")
+        if max_per_initiator < 1:
+            raise ValueError("max_per_initiator must be >= 1")
+        self._max_initiators = max_initiators
+        self._max_per_initiator = max_per_initiator
+        self._by_principal: Dict[bytes, Set[bytes]] = {}
+        self._lock = threading.Lock()
+
+    def __len__(self) -> int:
+        """Total number of remembered fingerprints across every partition."""
+        with self._lock:
+            return sum(len(part) for part in self._by_principal.values())
+
+    @property
+    def partitions(self) -> int:
+        """Number of distinct ``(responder, initiator)`` pairs being tracked."""
+        with self._lock:
+            return len(self._by_principal)
+
+    def check_and_add(self, principal: bytes, fingerprint: bytes) -> None:
+        """Reject ``fingerprint`` if already recorded for ``principal``, else record it.
+
+        Args:
+            principal: partition key — ``responder_pub || initiator_ik_pub``.
+            fingerprint: handshake fingerprint from :func:`_replay_key`.
+
+        Raises:
+            ReplayError: this exact handshake was already accepted.
+            ReplayGuardFull: the partition (or the partition table) is at
+                capacity, so freshness cannot be proven. Nothing is evicted.
+        """
+        with self._lock:
+            part = self._by_principal.get(principal)
+            if part is None:
+                if len(self._by_principal) >= self._max_initiators:
+                    raise ReplayGuardFull(
+                        "PQXDH replay guard is tracking the maximum number of "
+                        f"initiators ({self._max_initiators}); refusing new "
+                        "handshakes rather than forgetting a recorded one"
+                    )
+                part = set()
+                self._by_principal[principal] = part
+            # Membership is checked BEFORE capacity so a saturated partition
+            # still rejects every replay it already knows about.
+            if fingerprint in part:
+                raise ReplayError("PQXDH InitialMessage replay detected")
+            if len(part) >= self._max_per_initiator:
+                raise ReplayGuardFull(
+                    "PQXDH replay guard partition is full "
+                    f"({self._max_per_initiator} handshakes); refusing this "
+                    "handshake rather than forgetting a recorded one — rotate "
+                    "the responder's signed prekeys and clear the guard"
+                )
+            part.add(fingerprint)
+
+    def clear(self) -> None:
+        """Forget everything. Only safe alongside signed-prekey rotation."""
+        with self._lock:
+            self._by_principal.clear()
+
+
+# Process-wide default so the protection is on by default. Partitions are keyed
+# by ``(responder, initiator)`` so sharing it across tenants cannot cause
+# cross-tenant eviction or false positives; pass an explicit ``replay_cache``
+# anyway to scope capacity per account/device.
+_DEFAULT_REPLAY_CACHE = ReplayCache()
+
+
+def _replay_principal(responder_pub: bytes, message: InitialMessage) -> bytes:
+    """Partition key: which responder is being talked to, by which initiator."""
+    return responder_pub + message.ik_pub
+
+
+def _replay_key(message: InitialMessage, responder_pub: bytes) -> bytes:
+    """Length-prefixed fingerprint of the replay-relevant handshake inputs.
+
+    ``(ik_pub, ek_pub, kem_ct)`` fully determine ``SK`` together with the
+    responder's (fixed) prekeys, so they are exactly the tuple that must be
+    unique. The responder's identity is bound in too, so the same fingerprint
+    recorded for one responder can never be mistaken for a replay against a
+    different responder sharing the process-wide guard. Length prefixes make the
+    concatenation injective.
+    """
+    h = hashlib.sha256()
+    h.update(_REPLAY_TAG)
+    for part in (responder_pub, message.ik_pub, message.ek_pub, message.kem_ct):
+        h.update(struct.pack(">I", len(part)))
+        h.update(part)
+    h.update(struct.pack(">qq", message.spk_id, message.pqspk_id))
+    return h.digest()
+
+
+# ---------------------------------------------------------------------------
 # Handshake
 # ---------------------------------------------------------------------------
 
@@ -249,11 +428,50 @@ def responder_handshake(
     responder: IdentityKeyPair,
     secrets: PreKeySecrets,
     message: InitialMessage,
+    *,
+    replay_cache: Optional[ReplayCache] = None,
 ) -> bytes:
     """
-    Run the responder side. Recomputes the same ``SK`` and **consumes** the
-    one-time prekey so a replayed :class:`InitialMessage` cannot re-derive the
-    secret. The initiator is authenticated by the DH legs (DH1/DH2) per PQXDH.
+    Run the responder side. Recomputes the same ``SK``. The initiator is
+    authenticated by the DH legs (DH1/DH2) per PQXDH.
+
+    Replay protection
+    -----------------
+    Two independent mechanisms, because neither alone covers every path:
+
+    * **One-time prekey consumption.** When the initiator used an OPK it is
+      deleted here, so that exact handshake cannot be completed twice. This
+      applies **only** when ``message.opk_id is not None``, and it is *O(1)
+      unforgeable state*: nothing an attacker sends can put a consumed OPK back.
+    * **Replay guard.** On the no-OPK / last-resort path nothing is consumed and
+      :func:`_derive_sk` is deterministic, so a captured
+      :class:`InitialMessage` would otherwise re-derive the identical ``SK``
+      forever (audit finding M2). A :class:`ReplayCache` keyed on
+      ``(responder, ik_pub, ek_pub, kem_ct, spk_id, pqspk_id)`` rejects repeats
+      on *both* paths.
+
+    Ordering matters, and it is deliberate: **nothing is recorded until the
+    handshake has fully validated.** Key parsing, all DH legs, the one-time
+    prekey lookup and the ML-KEM decapsulation all run first. The guard's
+    earlier "record up-front" ordering meant an attacker could spend N malformed
+    messages to fill (and, back then, evict from) the cache; now malformed and
+    unusable handshakes cost the attacker work and consume no guard state at all.
+    Because the guard is partitioned per ``(responder, initiator)`` and refuses
+    rather than evicts at capacity, a flood can at worst deny *new* handshakes
+    from the flooding identity — it can never resurrect an old one.
+
+    A failure in :meth:`ReplayCache.check_and_add` happens *before* the one-time
+    prekey is deleted, so a rejected handshake never burns a fresh OPK and never
+    leaves partially-mutated state.
+
+    Args:
+        replay_cache: guard to use; defaults to a process-wide instance. Pass a
+            per-responder guard to scope capacity to one account/device.
+
+    Raises:
+        ReplayError: if this exact InitialMessage has already been processed.
+        ReplayGuardFull: if freshness cannot be proven (guard at capacity).
+        KeyError: if a referenced prekey is unknown or already consumed.
     """
     spk_priv = secrets.spk_priv.get(message.spk_id)
     if spk_priv is None:
@@ -262,6 +480,7 @@ def responder_handshake(
     if pq_dk is None:
         raise KeyError(f"unknown PQ prekey id {message.pqspk_id}")
 
+    # --- validate everything BEFORE touching replay state (cost -> attacker) ---
     ik_a_dh = X25519PublicKey.from_public_bytes(message.ik_pub)
     ek_a = X25519PublicKey.from_public_bytes(message.ek_pub)
 
@@ -269,15 +488,31 @@ def responder_handshake(
     dh2 = responder.dh(message.ek_pub)             # DH(EK_A, IK_B)
     dh3 = spk_priv.exchange(ek_a)
     dhs = [dh1, dh2, dh3]
+    opk_priv = None
     if message.opk_id is not None:
         opk_priv = secrets.opk_priv.get(message.opk_id)
         if opk_priv is None:
             raise KeyError(f"one-time prekey {message.opk_id} unavailable (replay?)")
         dhs.append(opk_priv.exchange(ek_a))
+
+    # ML-KEM decapsulation. The PQ shared secret is bound into SK on every path;
+    # there is no branch that omits it.
+    ss = PQXDH_KEM.decaps(pq_dk, message.kem_ct)
+    sk = _derive_sk(dhs, ss, message.ik_pub, responder.public)
+
+    # --- only now does the handshake earn a slot in the replay guard ---
+    cache = _DEFAULT_REPLAY_CACHE if replay_cache is None else replay_cache
+    cache.check_and_add(
+        _replay_principal(responder.public, message),
+        _replay_key(message, responder.public),
+    )
+
+    # Consume the one-time prekey last: if the guard refused above, no state
+    # was mutated at all.
+    if message.opk_id is not None:
         del secrets.opk_priv[message.opk_id]
 
-    ss = PQXDH_KEM.decaps(pq_dk, message.kem_ct)
-    return _derive_sk(dhs, ss, message.ik_pub, responder.public)
+    return sk
 
 
 if __name__ == "__main__":

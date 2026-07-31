@@ -6,7 +6,25 @@ Defines the protocol message format and serialization.
 Message Structure:
     - epoch: Current epoch being negotiated (8 bytes)
     - type: Message type enum (1 byte)
+    - data_len: payload length (2 bytes, ALWAYS present, 0 for payload-free types)
     - data: Optional chunk payload (variable length)
+    - frame_mac: 32-byte MAC over the whole frame body (see below)
+
+Frame authentication (audit finding M1)
+---------------------------------------
+The Braid content MACs cover only the reassembled header (``ek_seed || hek``) and
+the ciphertext bytes. They do **not** cover the wire framing, yet the state machine
+transitions on ``msg.epoch`` and ``msg.type`` (e.g. ``Ct2Sampled.receive`` advances
+the epoch on *any* message with ``epoch + 1``). A single spoofed frame therefore
+desynchronised a session permanently, because ``epoch`` is bound into every
+subsequent MAC.
+
+Every frame now carries a ``frame_mac`` computed by
+:meth:`ml_kem_braid.core.authenticator.Authenticator.mac_frame` over
+:meth:`Message.mac_input`, which is the canonical, length-prefixed encoding of the
+ENTIRE frame body (type byte + epoch + length prefix + payload). The Braid
+orchestrator seals on send and verifies before dispatching to the state machine, so
+no epoch/type-driven transition happens without a verified MAC.
 
 Message Types:
     - None: No payload (empty message)
@@ -27,6 +45,16 @@ import struct
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Optional
+
+
+# Size of the per-frame MAC (HMAC-SHA256, truncated to nothing).
+FRAME_MAC_SIZE = 32
+
+# Fixed part of the wire frame: epoch (8) + type (1) + data_len (2).
+_FRAME_PREAMBLE_SIZE = 11
+
+# Domain separator for the frame MAC input. Bumped whenever the framing changes.
+FRAME_MAC_DOMAIN = b"MLKEMBraid:frame:v2"
 
 
 class MessageType(IntEnum):
@@ -68,28 +96,35 @@ class Message:
     - A type indicating the message purpose
     - Optional chunk data as payload
     
-    Wire Format:
+    Wire Format (v2 — frame-authenticated):
         [epoch: 8 bytes, big-endian]
         [type: 1 byte]
-        [data_len: 2 bytes, big-endian] (only if type has payload)
-        [data: data_len bytes] (only if type has payload)
-    
+        [data_len: 2 bytes, big-endian]   (ALWAYS present; 0 for payload-free types)
+        [data: data_len bytes]
+        [frame_mac: 32 bytes]             (present iff the frame has been sealed)
+
+    The total frame length is therefore exactly ``11 + data_len`` (unsealed) or
+    ``11 + data_len + 32`` (sealed). Any other length is a framing error and is
+    rejected — trailing bytes are never ignored (audit finding L7).
+
     Usage:
         >>> msg = Message(epoch=1, type=MessageType.HDR, data=chunk_bytes)
         >>> wire_bytes = msg.to_bytes()
-        >>> 
+        >>>
         >>> msg2 = Message.from_bytes(wire_bytes)
         >>> assert msg2.epoch == msg.epoch
-    
+
     Attributes:
         epoch: Epoch identifier (unsigned 64-bit)
         type: Message type enum
         data: Optional payload bytes (chunk data)
+        frame_mac: 32-byte MAC over :meth:`mac_input`, or None if not yet sealed
     """
     epoch: int
     type: MessageType
     data: Optional[bytes] = None
-    
+    frame_mac: Optional[bytes] = None
+
     def __post_init__(self):
         """Validate message consistency."""
         if self.type.has_payload() and self.data is None:
@@ -97,60 +132,105 @@ class Message:
         if not self.type.has_payload() and self.data is not None:
             # Silently ignore data for types that don't use it
             self.data = None
-    
+        if not 0 <= self.epoch < 2 ** 64:
+            raise ValueError(f"epoch out of range: {self.epoch}")
+        if self.data is not None and len(self.data) > 0xFFFF:
+            raise ValueError(f"payload too large: {len(self.data)} bytes")
+        if self.frame_mac is not None and len(self.frame_mac) != FRAME_MAC_SIZE:
+            raise ValueError(
+                f"frame_mac must be {FRAME_MAC_SIZE} bytes, got {len(self.frame_mac)}"
+            )
+
+    def frame_body(self) -> bytes:
+        """
+        Serialize everything except the frame MAC.
+
+        This is the exact byte string the frame MAC authenticates.
+        """
+        payload = self.data or b""
+        return (
+            struct.pack(">Q", self.epoch)
+            + self.type.to_byte()
+            + struct.pack(">H", len(payload))
+            + payload
+        )
+
+    def mac_input(self) -> bytes:
+        """
+        Canonical MAC input for this frame.
+
+        ``FRAME_MAC_DOMAIN || u32(len(body)) || body`` where ``body`` is
+        :meth:`frame_body` — i.e. the ENTIRE serialized frame (type byte, epoch,
+        length prefix and payload). Every variable-length component is
+        length-prefixed so the encoding is injective (audit finding L6).
+        """
+        body = self.frame_body()
+        return FRAME_MAC_DOMAIN + struct.pack(">I", len(body)) + body
+
     def to_bytes(self) -> bytes:
         """
         Serialize message to wire format.
-        
+
         Returns:
             Bytes representation for transmission
         """
-        # Header: epoch (8 bytes) + type (1 byte)
-        header = struct.pack(">Q", self.epoch) + self.type.to_byte()
-        
-        if self.type.has_payload() and self.data is not None:
-            # Include length-prefixed data
-            data_len = struct.pack(">H", len(self.data))
-            return header + data_len + self.data
-        else:
-            return header
-    
+        if self.frame_mac is None:
+            return self.frame_body()
+        return self.frame_body() + self.frame_mac
+
     @classmethod
     def from_bytes(cls, raw: bytes) -> "Message":
         """
         Deserialize message from wire format.
-        
+
         Args:
             raw: Wire bytes received
-        
+
         Returns:
             Parsed Message object
-        
+
         Raises:
-            ValueError: If message is malformed
+            ValueError: If message is malformed, truncated, or has trailing bytes
         """
-        if len(raw) < 9:
+        if len(raw) < _FRAME_PREAMBLE_SIZE:
             raise ValueError(f"Message too short: {len(raw)} bytes")
-        
+
         # Parse header
         epoch = struct.unpack(">Q", raw[:8])[0]
         msg_type = MessageType.from_byte(raw[8])
-        
-        # Parse optional payload
-        data = None
-        if msg_type.has_payload():
-            if len(raw) < 11:
-                raise ValueError("Message with payload missing length field")
-            data_len = struct.unpack(">H", raw[9:11])[0]
-            if len(raw) < 11 + data_len:
-                raise ValueError(f"Message payload truncated: expected {data_len} bytes")
-            data = raw[11:11 + data_len]
-        
-        return cls(epoch=epoch, type=msg_type, data=data)
-    
+        data_len = struct.unpack(">H", raw[9:11])[0]
+
+        if not msg_type.has_payload() and data_len != 0:
+            raise ValueError(
+                f"Message type {msg_type.name} carries no payload but declares "
+                f"{data_len} bytes"
+            )
+
+        body_end = _FRAME_PREAMBLE_SIZE + data_len
+        if len(raw) < body_end:
+            raise ValueError(f"Message payload truncated: expected {data_len} bytes")
+
+        data = raw[_FRAME_PREAMBLE_SIZE:body_end] if msg_type.has_payload() else None
+
+        # The frame is either exactly the body, or the body plus a frame MAC.
+        # Anything else is trailing garbage and MUST be rejected (L7): silently
+        # ignoring it would make the wire encoding malleable.
+        remainder = len(raw) - body_end
+        if remainder == 0:
+            frame_mac = None
+        elif remainder == FRAME_MAC_SIZE:
+            frame_mac = raw[body_end:]
+        else:
+            raise ValueError(
+                f"Message has {remainder} trailing bytes after the frame body"
+            )
+
+        return cls(epoch=epoch, type=msg_type, data=data, frame_mac=frame_mac)
+
     def __repr__(self) -> str:
         data_info = f", {len(self.data)}B" if self.data else ""
-        return f"Message(epoch={self.epoch}, type={self.type.name}{data_info})"
+        sealed = "" if self.frame_mac is None else ", sealed"
+        return f"Message(epoch={self.epoch}, type={self.type.name}{data_info}{sealed})"
 
 
 # Factory functions for creating specific message types

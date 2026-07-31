@@ -1,4 +1,9 @@
 import os
+import subprocess
+import sys
+
+import pytest
+
 from ml_kem_braid.crypto import backend, vxeddsa, xeddsa
 
 LABEL = b"test-label"
@@ -59,3 +64,47 @@ def test_vrf_verify_rejects_neutral_v_point():
     neutral_v = b"\x01" + b"\x00" * 31
     crafted = neutral_v + real_proof[32:]
     assert vxeddsa.vrf_verify(pub, msg, crafted) is None
+
+
+# ---------------------------------------------------------------------------
+# L3 — VRF output-length invariant must be enforced without `assert`
+# ---------------------------------------------------------------------------
+
+class _ShortOutputBackend:
+    """Stub backend whose verify returns a truncated VRF output."""
+
+    def verifyVrfSignature(self, pub, msg, proof, label):
+        return b"\x00" * (vxeddsa.OUTPUT_SIZE - 1)
+
+
+def test_vrf_verify_raises_on_wrong_output_length(monkeypatch):
+    """L3: a backend returning a wrong-length output must fail closed with a
+    RuntimeError. `assert` is stripped under `python -O`, so the invariant would
+    otherwise silently return an undersized VRF output."""
+    priv = xeddsa.generate_identity()
+    pub = xeddsa.public_key(priv)
+    proof = b"\x01" * vxeddsa.PROOF_SIZE
+    monkeypatch.setattr(backend, "load", lambda: _ShortOutputBackend())
+    with pytest.raises(RuntimeError):
+        vxeddsa.vrf_verify(pub, b"m", proof)
+
+
+def test_vrf_length_invariant_survives_optimized_mode():
+    """The invariant must still be present when asserts are disabled (-O)."""
+    code = (
+        "from ml_kem_braid.crypto import backend, vxeddsa, xeddsa\n"
+        "class B:\n"
+        "    def verifyVrfSignature(self, pub, msg, proof, label):\n"
+        "        return b'\\x00' * 31\n"
+        "priv = xeddsa.generate_identity()\n"
+        "pub = xeddsa.public_key(priv)\n"
+        "backend.load = lambda: B()\n"
+        "try:\n"
+        "    vxeddsa.vrf_verify(pub, b'm', b'\\x01' * 96)\n"
+        "except RuntimeError:\n"
+        "    print('RAISED')\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-O", "-c", code], capture_output=True, text=True, check=True
+    )
+    assert "RAISED" in out.stdout

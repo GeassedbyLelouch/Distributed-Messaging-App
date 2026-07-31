@@ -69,3 +69,73 @@ def test_wrong_ciphertext_implicit_rejection():
     bad_ct2 = bytes(b ^ 0xFF for b in ct2)
     rejected = kem.decaps(kp.dk, ct1, bad_ct2)
     assert rejected != ss  # implicit rejection -> pseudorandom key
+
+
+# ---------------------------------------------------------------------------
+# L1 — decaps must enforce FIPS-203 ciphertext-component lengths
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("variant", list(MLKEMVariant))
+def test_decaps_rejects_wrong_length_components(variant):
+    """L1: malformed ct1/ct2 must raise ValueError up front, not be smuggled
+    into the implicit-rejection path by concatenation."""
+    kem = MLKEM(variant)
+    kp = kem.keygen()
+    es, ct1, _ = kem.encaps1(kp.ek_seed, kp.hek)
+    ct2 = kem.encaps2(es, kp.ek_seed, kp.ek_vector)
+
+    with pytest.raises(ValueError):
+        kem.decaps(kp.dk, ct1[:-1], ct2)
+    with pytest.raises(ValueError):
+        kem.decaps(kp.dk, ct1 + b"\x00", ct2)
+    with pytest.raises(ValueError):
+        kem.decaps(kp.dk, ct1, ct2[:-1])
+    with pytest.raises(ValueError):
+        kem.decaps(kp.dk, ct1, ct2 + b"\x00")
+    # A shifted split that still concatenates to a valid-length ciphertext must
+    # also be rejected — the component boundary is part of the contract.
+    joined = ct1 + ct2
+    with pytest.raises(ValueError):
+        kem.decaps(kp.dk, joined[: kem.params.ct1_size - 1], joined[kem.params.ct1_size - 1 :])
+
+
+@pytest.mark.parametrize("variant", list(MLKEMVariant))
+def test_decaps_still_implicitly_rejects_valid_length_garbage(variant):
+    """Length validation must not leak the implicit-rejection secret: a
+    well-formed-but-wrong ciphertext still yields an opaque 32-byte secret."""
+    kem = MLKEM(variant)
+    kp = kem.keygen()
+    bad_ct1 = b"\x01" * kem.params.ct1_size
+    bad_ct2 = b"\x02" * kem.params.ct2_size
+    ss = kem.decaps(kp.dk, bad_ct1, bad_ct2)
+    assert len(ss) == kem.params.shared_secret_size
+
+
+# ---------------------------------------------------------------------------
+# L2 — encaps1 must bind a caller-supplied hek to the ek_vector when given
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("variant", list(MLKEMVariant))
+def test_encaps1_rejects_hek_not_matching_ek_vector(variant):
+    """L2: with ek_vector supplied, a forged/mismatched header hek must raise."""
+    kem = MLKEM(variant)
+    kp = kem.keygen()
+    other = kem.keygen()
+
+    with pytest.raises(ValueError):
+        kem.encaps1(kp.ek_seed, other.hek, ek_vector=kp.ek_vector)
+    with pytest.raises(ValueError):
+        kem.encaps1(kp.ek_seed, kp.hek, ek_vector=other.ek_vector)
+    with pytest.raises(ValueError):
+        kem.encaps1(kp.ek_seed, bytes(32), ek_vector=kp.ek_vector)
+
+
+@pytest.mark.parametrize("variant", list(MLKEMVariant))
+def test_encaps1_with_matching_ek_vector_round_trips(variant):
+    kem = MLKEM(variant)
+    kp = kem.keygen()
+    es, ct1, ss_enc = kem.encaps1(kp.ek_seed, kp.hek, ek_vector=kp.ek_vector)
+    ct2 = kem.encaps2(es, kp.ek_seed, kp.ek_vector)
+    assert kem.decaps(kp.dk, ct1, ct2) == ss_enc

@@ -40,5 +40,11 @@ def vrf_verify(
         return None
     if result is None:
         return None
-    assert len(result) == OUTPUT_SIZE
+    # Fail closed on a backend invariant violation. A bare `assert` here would be
+    # stripped under `python -O`, silently returning an undersized VRF output.
+    if len(result) != OUTPUT_SIZE:
+        raise RuntimeError(
+            f"VXEdDSA backend returned {len(result)}-byte output, "
+            f"expected {OUTPUT_SIZE}"
+        )
     return result

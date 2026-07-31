@@ -38,6 +38,7 @@ ML-KEM ciphertext, so standard FIPS-203 ``Decaps`` recovers the shared secret.
 
 from __future__ import annotations
 
+import hmac
 import secrets
 from dataclasses import dataclass
 from enum import Enum
@@ -180,6 +181,7 @@ class MLKEM:
         ek_seed: bytes,
         hek: bytes,
         m: Optional[bytes] = None,
+        ek_vector: Optional[bytes] = None,
     ) -> Tuple[EncapsulationSecret, bytes, bytes]:
         """
         Phase 1: compute the shared secret ``K`` and ``ct1`` from the header only.
@@ -187,8 +189,32 @@ class MLKEM:
         Mirrors the first half of ``kyber_py``'s ``_k_pke_encrypt`` (the ``u``
         component), which depends solely on ``rho`` (= ``ek_seed``) and the
         encapsulation randomness ``r`` derived from ``m`` and ``hek``.
+
+        ``hek`` normally arrives in the peer's 64-byte header and is therefore
+        caller-supplied. When ``ek_vector`` is already known, pass it here: the
+        module then recomputes ``hek = SHA3-256(ek_vector || ek_seed)`` and
+        refuses to proceed on a mismatch, so a forged header hash can never be
+        folded into the FO transform (audit finding L2).
         """
         impl = self._impl
+        if len(ek_seed) != self.params.ek_seed_size:
+            raise ValueError(
+                f"ek_seed wrong length: expected {self.params.ek_seed_size}, "
+                f"got {len(ek_seed)}"
+            )
+        if len(hek) != 32:
+            raise ValueError(f"hek wrong length: expected 32, got {len(hek)}")
+        if ek_vector is not None:
+            if len(ek_vector) != self.params.ek_vector_size:
+                raise ValueError(
+                    f"ek_vector wrong length: expected {self.params.ek_vector_size}, "
+                    f"got {len(ek_vector)}"
+                )
+            if not hmac.compare_digest(hek, self.hek_for(ek_seed, ek_vector)):
+                raise ValueError(
+                    "hek does not match H(ek_vector || ek_seed); refusing to "
+                    "encapsulate against an unbound encapsulation key"
+                )
         if m is None:
             m = secrets.token_bytes(32)
 
@@ -243,7 +269,23 @@ class MLKEM:
         Standard FIPS-203 decapsulation over the reassembled ciphertext
         ``ct1 || ct2``, including the modulus/type checks and constant-time
         implicit rejection performed by ``kyber_py._decaps_internal``.
+
+        The per-component lengths are validated BEFORE concatenation (audit
+        finding L1): going straight to ``_decaps_internal`` skips the FIPS-203
+        public-API length check, so a malformed split would otherwise be masked
+        by implicit rejection instead of raising. A ciphertext of the correct
+        shape but wrong content still takes the implicit-rejection path and
+        returns an opaque 32-byte secret — the rejection value is never
+        distinguishable from a real one here.
         """
+        if len(ct1) != self.params.ct1_size:
+            raise ValueError(
+                f"ct1 wrong length: expected {self.params.ct1_size}, got {len(ct1)}"
+            )
+        if len(ct2) != self.params.ct2_size:
+            raise ValueError(
+                f"ct2 wrong length: expected {self.params.ct2_size}, got {len(ct2)}"
+            )
         return self._impl._decaps_internal(dk, ct1 + ct2)
 
     def __repr__(self) -> str:

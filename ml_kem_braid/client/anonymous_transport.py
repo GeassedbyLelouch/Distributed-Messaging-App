@@ -14,7 +14,6 @@ from ml_kem_braid.decentralized.circuits import (
     CircuitFrame,
     LayerKeys,
     build_three_hop_frame,
-    pad_payload,
 )
 
 
@@ -69,11 +68,15 @@ class AnonymousTransport:
             raise TypeError("payload must be bytes")
 
         self._sequence += 1
-        padded_payload = pad_payload(payload, 1024)
+        # Verifier D12: padding is applied once, by build_three_hop_frame.
+        # Pre-padding here relied on the frame builder recognising an
+        # already-padded block, which is exactly the ambiguity that let a
+        # payload be silently truncated on open.
         frame = build_three_hop_frame(
             circuit_id=self.circuit_id,
-            payload=padded_payload,
+            payload=payload,
             keys=_DEV_LAYER_KEYS,
             sequence=self._sequence,
+            size_class=1024,
         )
         return self.gateway.send_frame(frame)

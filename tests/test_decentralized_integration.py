@@ -3,7 +3,12 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from ml_kem_braid.client.client import BraidChatClient, HttpTransport, run_until_agreed
-from ml_kem_braid.decentralized.services import DecentralizedServices, FederatedRelay
+from ml_kem_braid.crypto import xeddsa
+from ml_kem_braid.decentralized.services import (
+    DecentralizedServices,
+    FederatedRelay,
+    sign_envelope,
+)
 from ml_kem_braid.server.app import create_app
 from ml_kem_braid.sesame.store import SesameStore
 
@@ -17,11 +22,15 @@ def test_cross_relay_delivery_preserves_opaque_message_body() -> None:
         "body": {"kem_ct": "opaque", "ik_pub": "public"},
     }
 
+    sender_key = xeddsa.generate_identity()
+    sender_pub = xeddsa.public_key(sender_key)
     relay_a.forward_to_relay(
         "relay-b",
         recipient_identity="b" * 64,
         recipient_device_id=1,
         envelope=envelope,
+        sender_identity=sender_pub,
+        sender_signature=sign_envelope(sender_key, "b" * 64, 1, envelope),
     )
 
     assert relay_b.services.fetch_mailbox("b" * 64, 1) == [envelope]

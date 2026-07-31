@@ -7,7 +7,9 @@ Endpoints (all JSON):
   GET  /keys/{username}/{device_id}   fetch a prekey bundle (consumes a one-time prekey)
   POST /messages                      relay an opaque encrypted envelope to a device
   GET  /messages   (Bearer token)     drain the calling device's mailbox
-  WS   /ws?token=  (Bearer token)     real-time push channel (send + receive)
+  WS   /ws         (Bearer token)     real-time push channel (send + receive)
+                                      (auth via Authorization header; the
+                                      ``?token=`` query param is deprecated)
   GET  /health                        liveness probe
 
 The server is a dumb relay: it stores only minimal metadata (username, device id,
@@ -30,9 +32,13 @@ in a subsequent ``GET /messages`` response because it was not written to the mai
 
 from __future__ import annotations
 
+import json
 import logging
+import threading
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
@@ -44,7 +50,13 @@ from ml_kem_braid.crypto import xeddsa
 from ml_kem_braid.pqxdh import create_identity, create_prekey_bundle
 from ml_kem_braid.pqxdh.pqxdh import _x25519_pub_bytes
 from ml_kem_braid.decentralized.services import DecentralizedServices
+from ml_kem_braid.server.client_ip import (
+    client_key as _forwarded_client_key,
+    normalize_host,
+    normalize_trusted_proxies,
+)
 from ml_kem_braid.server.decentralized_routes import build_decentralized_router
+from ml_kem_braid.server.ratelimit import TokenBucket
 from ml_kem_braid.sesame.base import StoreBackend
 from ml_kem_braid.sesame.sqlite_store import SqliteStore
 from ml_kem_braid.sesame.store import (
@@ -74,15 +86,33 @@ class _TLSEnforcementMiddleware(BaseHTTPMiddleware):
     """Reject non-HTTPS traffic with 426 and add HSTS to every response.
 
     Detection strategy (in order):
-    1. ``X-Forwarded-Proto: https`` header — set by reverse proxies (nginx,
-       AWS ALB, Cloudflare).  If present and equals ``"https"`` the request
-       is considered secure.
-    2. ASGI ``scope["scheme"]`` — set by uvicorn when the server is started
-       with TLS; equals ``"https"`` / ``"wss"`` for TLS connections.
+    1. ASGI ``scope["scheme"]`` — set by uvicorn when the server is started
+       with TLS; equals ``"https"`` / ``"wss"`` for TLS connections.  This is
+       the only signal that cannot be forged by the client.
+    2. ``X-Forwarded-Proto: https`` — set by a reverse proxy (nginx, AWS ALB,
+       Cloudflare).  **Audit M11:** this header is attacker-controlled, so it
+       is honoured *only* when the immediate peer (``request.client.host``)
+       appears in the configured ``trusted_proxies`` allow-list.  The default
+       allow-list is empty, meaning the header is never trusted and a
+       cleartext client cannot defeat the 426 gate (nor poison HSTS).
 
     Exempt paths (see ``_TLS_EXEMPT_PATHS``) pass through regardless so
     liveness probes work over plaintext.
     """
+
+    def __init__(self, app, trusted_proxies: Iterable[str] = ()) -> None:
+        super().__init__(app)
+        self._trusted_proxies: frozenset[str] = normalize_trusted_proxies(
+            trusted_proxies
+        )
+
+    def _forwarded_proto_is_trusted(self, request: Request) -> bool:
+        """Is ``X-Forwarded-Proto`` allowed to influence the TLS decision?"""
+        if not self._trusted_proxies:
+            return False
+        client = request.client
+        peer = normalize_host(client.host) if client is not None else ""
+        return bool(peer) and peer in self._trusted_proxies
 
     async def dispatch(self, request: Request, call_next):  # type: ignore[override]
         path = request.url.path
@@ -93,9 +123,12 @@ class _TLSEnforcementMiddleware(BaseHTTPMiddleware):
             return response
 
         # Determine whether the transport is secure.
-        forwarded_proto = request.headers.get("x-forwarded-proto", "").lower()
         scheme = request.scope.get("scheme", "http")
-        is_secure = forwarded_proto == "https" or scheme in ("https", "wss")
+        is_secure = scheme in ("https", "wss")
+        if not is_secure and self._forwarded_proto_is_trusted(request):
+            forwarded_proto = request.headers.get("x-forwarded-proto", "").lower()
+            # Take the left-most (client-facing) hop of a proxy chain.
+            is_secure = forwarded_proto.split(",")[0].strip() == "https"
 
         if not is_secure:
             return Response(
@@ -110,6 +143,81 @@ class _TLSEnforcementMiddleware(BaseHTTPMiddleware):
         return response
 
 
+# ---------------------------------------------------------------------------
+# Abuse limits (audit H1, M12, M13)
+# ---------------------------------------------------------------------------
+
+#: Hard ceiling on the number of one-time prekeys accepted at registration.
+#: Mirrors the ``le=64`` already enforced on :class:`UIRegisterRequest`.
+MAX_ONE_TIME_PREKEYS = 64
+
+
+@dataclass(frozen=True)
+class ServerLimits:
+    """Tunable abuse limits.
+
+    Rate limits are ``(capacity, refill_tokens_per_second)`` pairs; a
+    ``capacity`` of ``0`` disables that limiter entirely (useful for tests and
+    single-tenant deployments behind another rate limiter).
+    """
+
+    # Per-source-IP: prekey-bundle fetches (audit H1).
+    prekey_bundle_rate: tuple[int, float] = (60, 1.0)
+    # Per-source-IP: device registrations (audit M12).
+    register_rate: tuple[int, float] = (20, 0.1)
+    # Per-auth-token: outbound messages, HTTP and WebSocket (audit M13).
+    #
+    # Deliberately generous. ``/messages`` carries the Braid SCKA handshake as
+    # well as chat: negotiating ONE epoch costs ~46 posts per device, so a
+    # bucket sized for human typing rates silently caps how many epochs a
+    # session may negotiate — and it fails hard (the client raises on 429), it
+    # does not back off. The tight controls on this endpoint are the mailbox
+    # quota (``max_mailbox_per_device``) and the body cap
+    # (``max_message_body_bytes``), which bound what a flood can actually
+    # consume; this bucket is a flood valve on top of them.
+    send_rate: tuple[int, float] = (4096, 256.0)
+    # Per-source-IP: circuit-relay frame posts (audit M14).
+    circuit_rate: tuple[int, float] = (240, 20.0)
+
+    #: Number of one-time prekeys that are reserved from **every** caller,
+    #: authenticated or not (audit H1; round-2 D1).
+    #:
+    #: The round-1 fix reserved the floor from *anonymous* callers only.  But
+    #: ``POST /register`` is necessarily unauthenticated, so "authenticated" is
+    #: an identity anyone mints for free: register once, then drain the victim's
+    #: pool to zero.  The floor must therefore not be a function of "has a
+    #: token".  It is derived from the pool size itself — state an attacker can
+    #: only shrink, never forge, flood or evict — so no cache stands between the
+    #: attack and the decision.
+    opk_reserve_floor: int = 1
+    #: *Additional* reserve applied to unauthenticated callers.  The effective
+    #: floor is ``max(opk_reserve_floor, opk_anonymous_floor)`` for anonymous
+    #: callers and ``opk_reserve_floor`` for authenticated ones — so raising
+    #: this can only make the endpoint stricter, never weaker.
+    opk_anonymous_floor: int = 1
+    #: Emit a warning once the remaining pool reaches this size.
+    opk_low_water: int = 2
+
+    #: Maximum serialized size of a relayed message body (audit M13).
+    max_message_body_bytes: int = 64 * 1024
+    #: Maximum number of undelivered envelopes queued per recipient device.
+    max_mailbox_per_device: int = 1024
+
+    #: Maximum one-time prekeys accepted in a single registration (audit M12).
+    max_one_time_prekeys: int = MAX_ONE_TIME_PREKEYS
+
+
+#: Shared with the decentralized router — one implementation, no drift (D3).
+_TokenBucket = TokenBucket
+
+
+def _rate_limit(bucket: TokenBucket, key: str, what: str) -> None:
+    """Raise 429 when ``key`` has exhausted ``bucket``."""
+    if not bucket.allow(key):
+        _log.warning("rate limit exceeded for %s (key=%s)", what, key)
+        raise HTTPException(status_code=429, detail="rate limit exceeded")
+
+
 # -- request / response models ---------------------------------------------
 
 
@@ -120,7 +228,10 @@ class RegisterRequest(BaseModel):
     # XEdDSA signature over registration_challenge(username, registration_id),
     # proving possession of the bundle's ik_pub (base64).
     proof_sig: str
-    one_time_prekeys: dict[str, str] = Field(default_factory=dict)
+    # Audit M12: bounded so a single registration cannot pin unbounded memory.
+    one_time_prekeys: dict[str, str] = Field(
+        default_factory=dict, max_length=MAX_ONE_TIME_PREKEYS
+    )
 
 
 class RegisterResponse(BaseModel):
@@ -281,6 +392,9 @@ def create_app(
     enforce_tls: bool = False,
     enable_demo_ui: bool = False,
     enable_decentralized: bool = False,
+    trusted_proxies: Iterable[str] = (),
+    limits: Optional[ServerLimits] = None,
+    circuit_relay_token: Optional[str] = None,
 ) -> FastAPI:
     """Build a FastAPI app backed by ``store`` (a fresh in-memory store by default).
 
@@ -299,26 +413,75 @@ def create_app(
         enable_decentralized: Enable the experimental decentralized signed-record
                      registry API. Defaults to ``False`` to preserve the existing
                      route surface.
+        trusted_proxies: Peer addresses whose ``X-Forwarded-Proto`` header the
+                     TLS middleware is allowed to trust (audit M11).  Empty by
+                     default — the header is then *never* trusted.
+        limits:      Abuse limits (rate limits, body/mailbox caps).  See
+                     :class:`ServerLimits`; defaults are used when omitted.
+        circuit_relay_token: Optional shared bearer token required to post or
+                     drain decentralized circuit-relay frames (audit M14).
+                     ``None`` keeps the relay open (frames stay anonymous) but
+                     still hard-bounded and rate limited.
     """
     store = store or SesameStore()
+    limits = limits or ServerLimits()
     app = FastAPI(title="ML-KEM Braid Chat Server", version="0.3.0")
+    # Audit M11 / round-2 D3: ONE allow-list drives both the TLS decision and
+    # every rate-limit key, so the limiters cannot collapse into a single global
+    # bucket behind the reverse proxy M11 was written to support.
+    _trusted_proxies = normalize_trusted_proxies(trusted_proxies)
     if enforce_tls:
-        app.add_middleware(_TLSEnforcementMiddleware)
+        app.add_middleware(_TLSEnforcementMiddleware, trusted_proxies=_trusted_proxies)
     app.state.store = store
+    app.state.limits = limits
+    app.state.trusted_proxies = _trusted_proxies
+
+    def _client_key(request: Request) -> str:
+        """Rate-limit key: the forwarded client when the peer is a trusted proxy."""
+        return _forwarded_client_key(request, _trusted_proxies)
+
+    _bundle_bucket = _TokenBucket(*limits.prekey_bundle_rate)
+    _register_bucket = _TokenBucket(*limits.register_rate)
+    _send_bucket = _TokenBucket(*limits.send_rate)
+
+    # Observability for audit H1: how often a device's one-time prekey pool ran
+    # down to the anonymous floor.  Keyed by ``(username, device_id)``.
+    opk_depletion_events: Dict[tuple[str, int], int] = {}
+    app.state.opk_depletion_events = opk_depletion_events
+
     if enable_decentralized:
         decentralized_services = DecentralizedServices()
         app.state.decentralized_services = decentralized_services
-        app.include_router(build_decentralized_router(decentralized_services))
+        app.include_router(
+            build_decentralized_router(
+                decentralized_services,
+                relay_token=circuit_relay_token,
+                rate_limit=limits.circuit_rate,
+                trusted_proxies=_trusted_proxies,
+            )
+        )
 
     # Shared connection manager for the WebSocket endpoint.
     manager = ConnectionManager()
     app.state.manager = manager
 
     _envelope_counter = {"n": 0}
+    _envelope_lock = threading.Lock()
+    #: Serializes the OPK floor check with the consumption it authorizes.
+    _bundle_lock = threading.Lock()
 
     def _next_envelope_id() -> str:
-        _envelope_counter["n"] += 1
-        return f"env-{_envelope_counter['n']}"
+        """Process-unique *and* globally unique envelope id.
+
+        Audit L10: the counter alone restarts at 0 on every process start, so a
+        restart with undrained mailbox rows collided on the ``envelope_id``
+        PRIMARY KEY (``sqlite3.IntegrityError`` → 500).  The random suffix makes
+        collisions negligible while the counter keeps ids roughly ordered.
+        """
+        with _envelope_lock:
+            _envelope_counter["n"] += 1
+            n = _envelope_counter["n"]
+        return f"env-{n}-{uuid.uuid4().hex}"
 
     def auth_device(authorization: str = Header(default="")) -> Device:
         if not authorization.startswith("Bearer "):
@@ -328,6 +491,12 @@ def create_app(
         if device is None:
             raise HTTPException(status_code=401, detail="invalid token")
         return device
+
+    def _device_for_authorization(authorization: str) -> Optional[Device]:
+        """Resolve an optional bearer header to a device (no exception)."""
+        if not authorization.startswith("Bearer "):
+            return None
+        return store.device_for_token(authorization[len("Bearer "):])
 
     def _validation_422(exc: UsernameValidationError) -> HTTPException:
         return HTTPException(
@@ -442,8 +611,48 @@ def create_app(
     def ui_logo():
         return _ui_asset("logo.svg")
 
+    def _guard_registration(request: Request) -> None:
+        """Single gate every registration door must pass through.
+
+        Audit M12 / round-2 D2: registration is necessarily unauthenticated, so
+        bound how fast one source can mint brand-new identities.  ``/register``
+        and the demo ``/ui/register`` share this one limiter (and the bucket
+        itself) so a caller cannot dodge the limit by switching doors, and the
+        two can never drift apart again.
+        """
+        _rate_limit(_register_bucket, _client_key(request), "register")
+
+    def _register_device_or_refuse(
+        *,
+        username: str,
+        registration_id: int,
+        bundle: dict,
+        identity_key: bytes,
+        one_time_prekeys: dict,
+    ) -> Device:
+        """Register a device, mapping a refusal to a generic 403 (audit L11).
+
+        The backend message names the exact reason ("username already registered
+        to a different identity key"), an account-existence oracle.  Every
+        registration door funnels through here so none of them leaks it.
+        """
+        try:
+            return store.register_device(
+                username=username,
+                registration_id=registration_id,
+                bundle=bundle,
+                identity_key=identity_key,
+                one_time_prekeys=one_time_prekeys,
+            )
+        except PermissionError as exc:
+            _log.warning("registration refused for %r: %s", username, exc)
+            raise HTTPException(status_code=403, detail="registration refused")
+
     @app.post("/register", response_model=RegisterResponse)
-    def register(req: RegisterRequest) -> RegisterResponse:
+    def register(req: RegisterRequest, request: Request) -> RegisterResponse:
+        _guard_registration(request)
+        if len(req.one_time_prekeys) > limits.max_one_time_prekeys:
+            raise HTTPException(status_code=422, detail="too many one-time prekeys")
         # Authenticate ownership: the bundle's identity key must sign the
         # registration challenge (proves the registrant holds the private key).
         try:
@@ -456,17 +665,19 @@ def create_app(
         ):
             raise HTTPException(status_code=401, detail="invalid registration proof")
 
-        otks = {int(k): v for k, v in req.one_time_prekeys.items()}
+        # Audit M12: a non-integer opk id used to raise an uncaught ValueError
+        # (500).  Reject it as a client error instead.
         try:
-            device = store.register_device(
-                username=req.username,
-                registration_id=req.registration_id,
-                bundle=req.bundle,
-                identity_key=ik_pub,
-                one_time_prekeys=otks,
-            )
-        except PermissionError as exc:
-            raise HTTPException(status_code=403, detail=str(exc))
+            otks = {int(k): v for k, v in req.one_time_prekeys.items()}
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="malformed one-time prekeys")
+        device = _register_device_or_refuse(
+            username=req.username,
+            registration_id=req.registration_id,
+            bundle=req.bundle,
+            identity_key=ik_pub,
+            one_time_prekeys=otks,
+        )
         return RegisterResponse(
             username=device.username,
             device_id=device.device_id,
@@ -476,7 +687,10 @@ def create_app(
     if enable_demo_ui:
 
         @app.post("/ui/register", response_model=RegisterResponse)
-        def ui_register(req: UIRegisterRequest) -> RegisterResponse:
+        def ui_register(req: UIRegisterRequest, request: Request) -> RegisterResponse:
+            # Round-2 D2: this demo door used to bypass the M12 limiter and the
+            # L11 generic-error path entirely.  It now shares both.
+            _guard_registration(request)
             try:
                 normalize_username(req.username)
             except UsernameValidationError as exc:
@@ -491,16 +705,13 @@ def create_app(
                 for opk_id, priv in secrets.opk_priv.items()
             }
 
-            try:
-                device = store.register_device(
-                    username=req.username,
-                    registration_id=req.registration_id,
-                    bundle=bundle_to_dict(bundle),
-                    identity_key=identity.public,
-                    one_time_prekeys=one_time_prekeys,
-                )
-            except PermissionError as exc:
-                raise HTTPException(status_code=409, detail=str(exc))
+            device = _register_device_or_refuse(
+                username=req.username,
+                registration_id=req.registration_id,
+                bundle=bundle_to_dict(bundle),
+                identity_key=identity.public,
+                one_time_prekeys=one_time_prekeys,
+            )
 
             return RegisterResponse(
                 username=device.username,
@@ -634,11 +845,112 @@ def create_app(
         ]
 
     @app.get("/keys/{username}/{device_id}")
-    def get_bundle(username: str, device_id: int) -> dict:
-        bundle = store.take_prekey_bundle(username, device_id)
+    def get_bundle(
+        username: str,
+        device_id: int,
+        request: Request,
+        authorization: str = Header(default=""),
+    ) -> dict:
+        """Fetch a prekey bundle, normally consuming one one-time prekey.
+
+        Audit H1 (+ round-2 D1) — the endpoint stays publicly reachable (Signal
+        model) but a drain-the-pool loop is no longer free:
+
+        * per-client token bucket (proxy-aware key, see ``_client_key``);
+        * **no caller** — authenticated or not — is served the last
+          ``limits.opk_reserve_floor`` one-time prekeys; it gets a valid bundle
+          with ``opk_id=None`` instead.  Anonymous callers additionally respect
+          ``limits.opk_anonymous_floor``;
+        * depletion is counted on ``app.state.opk_depletion_events`` and logged.
+
+        Why the floor is not gated on authentication (round-2 D1): ``POST
+        /register`` is unauthenticated by design, so a bearer token is an
+        identity any attacker mints for free — "authenticated" carries no cost
+        and therefore no security.  The floor is instead derived from the pool
+        size itself: monotone, attacker-shrinkable-only state that cannot be
+        forged, flooded or evicted.  A per-(caller, target) consumption quota
+        was deliberately *not* added on top: any such table is keyed by
+        free-to-mint identities, so it is either unbounded memory or a
+        fail-open eviction primitive (flood the table, evict your own counter,
+        resume draining) — exactly the anti-pattern this round exists to remove.
+
+        Note the PQ leg is unaffected either way: the ML-KEM public key comes
+        from the signed last-resort prekey, not from the one-time prekey.
+        """
+        _rate_limit(_bundle_bucket, _client_key(request), "prekey bundle")
+
+        authenticated = _device_for_authorization(authorization) is not None
+        floor = limits.opk_reserve_floor
+        if not authenticated:
+            floor = max(floor, limits.opk_anonymous_floor)
+
+        # "count the pool, then consume from it" is check-then-act: two
+        # concurrent fetches both observing ``floor + 1`` would each take one
+        # and push the pool below the floor.  One process-wide lock (no
+        # per-principal state to flood) makes the pair atomic in-process.
+        with _bundle_lock:
+            device = store.get_device(username, device_id)
+            if device is None:
+                raise HTTPException(status_code=404, detail="unknown user/device")
+
+            remaining = len(device.one_time_prekeys or {})
+            if remaining <= floor:
+                key = (username, device_id)
+                opk_depletion_events[key] = opk_depletion_events.get(key, 0) + 1
+                _log.warning(
+                    "one-time prekey pool at floor for %s/%s (%d left, floor=%d); "
+                    "serving %s caller a bundle without a one-time prekey",
+                    username,
+                    device_id,
+                    remaining,
+                    floor,
+                    "authenticated" if authenticated else "anonymous",
+                )
+                bundle = dict(device.bundle)
+                bundle["opk_id"] = None
+                bundle["opk_pub"] = None
+                return {"username": username, "device_id": device_id, "bundle": bundle}
+
+            bundle = store.take_prekey_bundle(username, device_id)
         if bundle is None:
             raise HTTPException(status_code=404, detail="unknown user/device")
+        if remaining - 1 <= limits.opk_low_water:
+            _log.warning(
+                "one-time prekey pool low for %s/%s: %d remaining — replenish",
+                username,
+                device_id,
+                max(0, remaining - 1),
+            )
         return {"username": username, "device_id": device_id, "bundle": bundle}
+
+    def _body_size(body: dict) -> int:
+        """Serialized size of a relayed body, in bytes."""
+        try:
+            return len(json.dumps(body, separators=(",", ":")).encode("utf-8"))
+        except (TypeError, ValueError):
+            # Non-serialisable body: treat as oversized rather than crashing.
+            return limits.max_message_body_bytes + 1
+
+    def _check_relay_quota(req: SendMessageRequest, sender: Device) -> None:
+        """Audit M13: bound body size, mailbox depth and per-token send rate.
+
+        Raises :class:`HTTPException` (413 / 429) when a limit is exceeded.
+        """
+        _rate_limit(_send_bucket, sender.auth_token, "send message")
+        if _body_size(req.body) > limits.max_message_body_bytes:
+            raise HTTPException(status_code=413, detail="message body too large")
+        if limits.max_mailbox_per_device > 0:
+            pending = store.pending_count(
+                req.recipient_username, req.recipient_device_id
+            )
+            if pending >= limits.max_mailbox_per_device:
+                _log.warning(
+                    "mailbox full for %s/%s (%d pending)",
+                    req.recipient_username,
+                    req.recipient_device_id,
+                    pending,
+                )
+                raise HTTPException(status_code=429, detail="recipient mailbox full")
 
     @app.post("/messages")
     async def send_message(
@@ -646,6 +958,7 @@ def create_app(
     ) -> dict:
         if store.get_device(req.recipient_username, req.recipient_device_id) is None:
             raise HTTPException(status_code=404, detail="unknown recipient device")
+        _check_relay_quota(req, sender)
         # Sender identity comes from the authenticated token, not the request body,
         # so envelopes cannot be spoofed as originating from another device.
         envelope = Envelope(
@@ -683,13 +996,18 @@ def create_app(
     @app.websocket("/ws")
     async def websocket_endpoint(
         websocket: WebSocket,
-        token: str = Query(...),
+        token: Optional[str] = Query(default=None),
+        authorization: str = Header(default=""),
     ) -> None:
         """Real-time push channel.
 
-        Authentication: ``?token=<bearer>`` query parameter.  Rejected with
-        close code 1008 (Policy Violation) if the token is invalid — matching
-        the HTTP 401 behaviour on the REST endpoints.
+        Authentication (audit L9): prefer ``Authorization: Bearer <token>`` on
+        the handshake request.  The ``?token=<bearer>`` query parameter is
+        **deprecated** — a URL query string lands in proxy access logs, browser
+        history and Referer headers — and is retained only for backwards
+        compatibility with existing clients.  Rejected with close code 1008
+        (Policy Violation) if neither carries a valid token — matching the HTTP
+        401 behaviour on the REST endpoints.
 
         On connect the device's queued mailbox is flushed to the socket so no
         envelopes are missed during the gap between HTTP polling and WS connect.
@@ -698,7 +1016,10 @@ def create_app(
         ``SendMessageRequest`` fields.  The sender is *always* derived from the
         authenticated token — never from the frame body.
         """
-        device = store.device_for_token(token)
+        device = _device_for_authorization(authorization)
+        if device is None and token:
+            # Deprecated transport for the bearer token; see the docstring.
+            device = store.device_for_token(token)
         if device is None:
             await websocket.close(code=1008)
             return
@@ -735,13 +1056,33 @@ def create_app(
                         kind=data["kind"],
                         body=data["body"],
                     )
-                except Exception as exc:
-                    await websocket.send_json({"type": "error", "detail": str(exc)})
+                except Exception:
+                    # Audit L11: a raw pydantic/`int()` error leaks the server's
+                    # internal model shape.  Log it, return a generic message.
+                    _log.info(
+                        "rejected malformed WS frame from %s/%s",
+                        device.username,
+                        device.device_id,
+                        exc_info=True,
+                    )
+                    await websocket.send_json(
+                        {"type": "error", "detail": "invalid frame"}
+                    )
                     continue
 
                 if store.get_device(req.recipient_username, req.recipient_device_id) is None:
                     await websocket.send_json(
                         {"type": "error", "detail": "unknown recipient device"}
+                    )
+                    continue
+
+                # Audit M13: the WS path relays exactly like POST /messages and
+                # must honour the same body/mailbox/rate limits.
+                try:
+                    _check_relay_quota(req, device)
+                except HTTPException as exc:
+                    await websocket.send_json(
+                        {"type": "error", "detail": exc.detail}
                     )
                     continue
 
@@ -809,6 +1150,13 @@ def main() -> None:
     tls_key = os.environ.get("BRAID_TLS_KEY")
     tls_client_ca = os.environ.get("BRAID_TLS_CLIENT_CA")
     enable_demo_ui = os.environ.get("BRAID_ENABLE_DEMO_UI") == "1"
+    # Audit M11: comma-separated peer addresses whose X-Forwarded-Proto is
+    # trusted.  Unset (the default) means the header is never trusted.
+    trusted_proxies = tuple(
+        p.strip()
+        for p in os.environ.get("BRAID_TRUSTED_PROXIES", "").split(",")
+        if p.strip()
+    )
 
     use_tls = bool(tls_cert and tls_key)
     _tls_enabled = use_tls  # captured for enforce_tls flag
@@ -819,6 +1167,7 @@ def main() -> None:
         _store,
         enforce_tls=_tls_enabled,
         enable_demo_ui=enable_demo_ui,
+        trusted_proxies=trusted_proxies,
     )
 
     uvicorn_kwargs: dict = {

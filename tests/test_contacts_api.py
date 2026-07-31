@@ -133,7 +133,10 @@ def test_demo_register_enforces_case_insensitive_username_hash() -> None:
 
     duplicate = client.post("/ui/register", json={"username": "alice.42"})
 
-    assert duplicate.status_code == 409
+    # Audit L11 / round-2 D2: the demo door shares ``/register``'s generic
+    # refusal, so it is not an account-existence oracle either.
+    assert duplicate.status_code == 403
+    assert duplicate.json()["detail"] == "registration refused"
 
 
 def test_demo_register_rejects_invalid_signal_username() -> None:

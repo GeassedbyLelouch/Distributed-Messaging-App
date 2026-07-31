@@ -78,7 +78,15 @@ def test_failed_ciphertext_mac_does_not_mutate_authenticator():
     cand_root, cand_mac = a.kdf.kdf_auth(a.state.root_key, ss, 2)
     import hashlib
     import hmac
-    good = hmac.new(cand_mac, a.protocol_info + b":ciphertext" + (2).to_bytes(8, "big") + b"ct", hashlib.sha256).digest()
+    # MAC inputs are canonical (length-prefixed) since audit finding L6; build the
+    # expected input with the same encoder the authenticator uses.
+    from ml_kem_braid.core.authenticator import _canonical_mac_input
+
+    good = hmac.new(
+        cand_mac,
+        _canonical_mac_input(a.protocol_info, b":ciphertext", 2, b"ct"),
+        hashlib.sha256,
+    ).digest()
     a.update_and_verify_ciphertext(2, ss, b"ct", good)
     assert a.state.mac_key == cand_mac
 

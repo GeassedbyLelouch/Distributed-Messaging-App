@@ -463,9 +463,11 @@ PQXDH is a client, and it runs no admission control. **Decision:** `PrekeyBundle
 `EnrolmentProof` (an issuer-signed statement over `IdentityId`, or in M2 a nullifier commitment), so a
 responding client verifies scarcity **locally** before allocating per-peer state.
 
-**Honest limitation:** in a future serverless/rendezvous mode there is no issuer, and therefore no
-scarcity bound. This specification does not claim one for that mode. Stating this is required; a trait
-bound that reads as a compile-time guarantee at a site where it is unverifiable is worse than no bound.
+**Serverless/rendezvous mode:** there is no issuer, and therefore no issuer-backed scarcity bound. The
+weaker bound is **accepted** (decision, 2026-07-31) under the containment policy in §6.6, which defines
+precisely what degrades and what must still hold. A trait bound that reads as a compile-time guarantee
+at a site where it is unverifiable is worse than no bound, so `ScarcePrincipal` is **not** implemented
+for serverless peers; §6.6 supplies a different, locally-verifiable anchor instead.
 
 ### 6.3 Replay defence — monotonic counters, not remembered sets
 
@@ -513,6 +515,54 @@ Every row must be defensible against **both** the fail-open and fail-closed atta
 
 Rows 7, 8 and 9 are the point: **three controls are removed rather than tuned.** A control that does not
 exist cannot be flooded.
+
+The table above assumes an issuer-backed principal (server mode). §6.6 restates rows 1–3 for serverless
+mode, where that assumption does not hold.
+
+### 6.6 Serverless mode — the accepted weaker bound, specified
+
+**Decision (2026-07-31): accept the weaker bound.** This section defines it, because an accepted
+weakness that is not written down becomes an assumed strength.
+
+**The anchor changes, it does not vanish.** With no issuer, the scarce principal in serverless mode is
+**explicit user consent**: a peer the user has paired with or accepted into their contact list. Minting
+an identity stays free, but *becoming a peer the local device allocates durable state for* is gated by a
+human action that cannot be automated by a remote attacker. Peers are therefore partitioned into two
+classes, and this partition is the entire mechanism:
+
+| Class | Definition | State budget |
+|---|---|---|
+| **Established** | User has accepted/paired with this peer | Full per-peer state (§6.4 rows 1–3), bounded per peer |
+| **Unknown** | Everyone else | One small, separate, fail-closed pool for pending first contacts |
+
+**The containment property — what must still hold, and is testable:**
+
+> Flooding the Unknown pool must never evict, degrade, or deny service to any **Established** peer.
+
+The two pools are separate allocations. The Unknown pool fails closed at capacity (rejecting *new*
+first-contact attempts); it never borrows from, and never evicts, Established state.
+
+**What is therefore accepted as degraded:** an attacker who floods the Unknown pool can deny **inbound
+first contact from new peers** for the duration of the flood, on that device, in serverless mode. That
+is the whole of the accepted weakness.
+
+**What is explicitly NOT accepted, and must remain true even in serverless mode:**
+
+1. No established session may be evicted, desynced, or locked out.
+2. No replay defence for an Established peer may be weakened — §6.3 floors are unforgeable-small and
+   sit in the Established budget.
+3. Confidentiality, authenticity and the PQ invariant (§4.1) are unaffected. This is an
+   **availability-of-first-contact** degradation only, not a compromise of any cryptographic property.
+4. The failure must be visible: exhausting the Unknown pool surfaces a distinct, user-actionable error
+   (`ProtocolError::FirstContactCapacity`), never a silent drop.
+
+**Cost-raising for first contact (optional, recommended).** Rendezvous first contact may require a
+client-side proof-of-work bound to the rendezvous token. This does not restore a real scarcity bound —
+PoW is purchasable — but it raises the flood's cost from free to metered. It is a mitigation, not a fix,
+and this document does not claim otherwise.
+
+**CI gate.** §11 gate 5 applies with the containment property as the assertion: flood the Unknown pool,
+then prove an Established peer still completes a full send/receive round trip.
 
 ### 6.5 One-time prekey lifecycle
 
@@ -795,13 +845,21 @@ APIs nobody in this project has run:
 | Ratchet-state rollback | High | Random nonces make it non-catastrophic; detection + fail-closed (§5.2) |
 | Hybrid bundles ~5.8× larger | Medium | Fetch-on-wake; measure in Phase 0 |
 | Admission control becomes a deanonymization vector | Medium | M1 reuses attestation; M2 blind signatures — but **[VERIFY]** the blindness variant |
+| Serverless first-contact flooding | **Accepted** | §6.6 containment: separate Unknown pool, fail-closed, must never touch Established peers. Optional PoW meters the cost. Degradation is availability-of-first-contact only. |
 | Voucher issuer is an unowned new service | Medium | M2 does not start without a design and an owner |
 | Cross-process store corruption (NSE + app) | Medium | WAL + advisory lock; **[VERIFY]** under Data Protection |
 | Scope | High | §2 scope cut is normative |
 
-### Open questions requiring a human decision
+### Decisions taken
 
-1. **Serverless mode has no scarcity anchor** (§6.2). Accept the weaker bound, or drop the mode?
+1. ~~Serverless mode has no scarcity anchor — accept the weaker bound, or drop the mode?~~
+   **RESOLVED 2026-07-31: accept the weaker bound.** Scoped in §6.6. The accepted degradation is
+   *denial of inbound first contact from new peers, in serverless mode, during a flood*. Established
+   sessions, replay defence, and all cryptographic properties are unaffected, and the containment
+   property is a CI gate.
+
+### Open questions still requiring a human decision
+
 2. **No migration path from v1.** Confirmed acceptable?
 3. **M2 voucher issuer** — who builds and operates it?
 4. Is the deferred Braid SCKA split still a product requirement, given M1 delivers PQ security without

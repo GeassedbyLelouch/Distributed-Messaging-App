@@ -1,0 +1,13 @@
+# Project vocabulary that `clippy::doc_markdown` would otherwise want in
+# backticks. These are protocol and product names, not code identifiers, and
+# rendering them as code in the docs would be wrong.
+#
+# `".."` keeps clippy's own default list rather than replacing it.
+doc-valid-idents = [
+    "XEdDSA",
+    "XEd25519",
+    "XChaCha20",
+    "XChaCha20-Poly1305",
+    "SQLCipher",
+    "..",
+]

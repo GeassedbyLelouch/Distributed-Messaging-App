@@ -1,0 +1,36 @@
+[package]
+name = "mlkb-crypto"
+description = "Every algorithm and nonce choice in ML-KEM-Braid."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mlkb-secrets = { workspace = true }
+# Spec M1 §G.3: `Aad<'a>(&'a CanonicalBytes)` and `CanonicalBytes` is
+# constructible only by `mlkb_codec::encode_canonical`. `MessageKey::seal`
+# cannot name its AAD type without this edge. The edge is acyclic:
+# `mlkb-codec` has no internal dependencies.
+mlkb-codec = { workspace = true }
+ml-kem = { workspace = true }
+ml-dsa = { workspace = true }
+x25519-dalek = { workspace = true }
+curve25519-dalek = { workspace = true }
+chacha20poly1305 = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+zeroize = { workspace = true }
+rand_core = { workspace = true }
+
+[dev-dependencies]
+# Tests only: the system CSPRNG. The library is RNG-source agnostic and takes
+# `&mut impl CryptoRng` at every randomised entry point.
+getrandom = { workspace = true, features = ["sys_rng"] }

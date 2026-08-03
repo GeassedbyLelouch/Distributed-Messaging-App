@@ -1,0 +1,21 @@
+[package]
+name = "mlkb-bounded"
+description = "Every capacity-bounded structure in ML-KEM-Braid: the only place an eviction may be written."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Parent spec §8.4 defines exactly one `ProtocolError`. `mlkb-secrets` already
+# owns it together with `Progress<T>` — the other half of that section — so this
+# crate depends on it rather than defining a second one (rule zero). The edge is
+# acyclic: `mlkb-secrets` has no internal dependencies, and both crates are
+# no_std + pure.
+mlkb-secrets = { workspace = true }
+

@@ -1,0 +1,20 @@
+[package]
+name = "mlkb-store"
+description = "Durability, atomic CAS and rollback detection for ML-KEM-Braid."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mlkb-protocol = { workspace = true }
+mlkb-secrets = { workspace = true }
+mlkb-crypto = { workspace = true }
+mlkb-codec = { workspace = true }
+rusqlite = { workspace = true, features = ["bundled"] }
+thiserror = { workspace = true }

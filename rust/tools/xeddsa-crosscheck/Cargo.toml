@@ -1,0 +1,23 @@
+# Differential cross-check harness: our XEdDSA against the vendored Signal C.
+#
+# Parent spec §5.4 requires the port to be byte-for-byte compatible with the
+# vendored C, and §11 gate 1 requires Signal XEdDSA vectors in CI. The pinned
+# vectors in `mlkb-crypto/tests/xeddsa_kat.rs` cover a fixed set; this harness
+# establishes the stronger property — that the ACCEPTED SETS are identical over
+# a large random sample, including the malformed inputs Signal deliberately
+# does NOT reject. Without it, that equality has to be re-derived by hand after
+# every edit to `xeddsa.rs`.
+#
+# Not part of the mobile build and not a dependency of any shipping crate.
+[package]
+name = "xeddsa-crosscheck"
+description = "Differential harness: mlkb-crypto XEdDSA vs the vendored Signal C"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+mlkb-crypto = { workspace = true }
+rand_core = { workspace = true }

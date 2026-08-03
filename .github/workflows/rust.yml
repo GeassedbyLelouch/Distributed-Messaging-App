@@ -1,0 +1,110 @@
+# Spec §11 CI gates. Each job below is one numbered gate; the gate numbers are
+# in the job names so a failure maps straight back to the specification.
+#
+# Gate 1 (FIPS/RFC/Signal KATs) and gate 2 (canonical-encoding round-trip and
+# float rejection) are asserted by `cargo test`, which runs them unconditionally
+# — no feature flag, no `#[ignore]`. Gate 5 (flood tests) likewise lives in
+# `mlkb-bounded`'s suite. They are called out here so the mapping is recorded.
+name: rust
+
+on:
+  push:
+    paths: ['rust/**', '.github/workflows/rust.yml']
+  pull_request:
+    paths: ['rust/**', '.github/workflows/rust.yml']
+
+defaults:
+  run:
+    working-directory: rust
+
+jobs:
+  # Gates 1, 2, 5: KATs, canonical encoding, and the mandatory flood tests.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo test --locked --workspace --all-targets
+      - run: cargo test --locked --workspace --doc
+
+      # A green run must not be achievable by skipping. The suite is the gate,
+      # so an `#[ignore]` added later would silently retire a KAT.
+      - name: no test is ignored
+        run: |
+          if grep -rn --include='*.rs' '#\[\s*ignore' crates/ tools/; then
+            echo "::error::an ignored test would silently retire a §11 gate"
+            exit 1
+          fi
+
+  # Gate 7: the panic-free lint policy, tested against the code rather than
+  # merely declared. (One design track's own sample code violated the lints it
+  # mandated — hence this job.)
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  # Gate 6, part (b): the no-`std` subtree really builds for bare metal.
+  #
+  # Recorded verbatim from the spec so nobody overstates it later: this proves
+  # no-`std`; it does NOT prove absence of global mutable state — `static mut`,
+  # atomics and spin-locks all compile.
+  no_std:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: >
+          cargo check --locked --target thumbv7em-none-eabi
+          -p mlkb-secrets -p mlkb-bounded -p mlkb-codec -p mlkb-crypto -p mlkb-protocol
+
+  # Gate 6, part (c): the crate DAG and the ban on any second serialization
+  # implementation. `ciborium` is denied outright — it cannot produce the
+  # RFC 8949 §4.2.1 profile (M1 §B.1), so `mlkb-codec` owns the only encoder.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: rust/Cargo.toml
+
+  # Gate 1, XEdDSA leg: byte-for-byte equality with the vendored Signal C.
+  #
+  # The pinned vectors in `mlkb-crypto/tests/xeddsa_kat.rs` run in `test` above.
+  # This job proves the stronger property — that the ACCEPTED SETS are identical
+  # over a random sample, including the malformed inputs Signal deliberately
+  # does not reject (parent §5.4 forbids adding rejections of our own).
+  xeddsa_vs_signal_c:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo build --locked --release -p xeddsa-crosscheck
+      - name: build the vendored Signal C extension
+        working-directory: .
+        run: uv run python build_curve25519.py
+      - name: differential accepted-set equality
+        working-directory: .
+        run: uv run python rust/tools/xeddsa-crosscheck/crosscheck.py

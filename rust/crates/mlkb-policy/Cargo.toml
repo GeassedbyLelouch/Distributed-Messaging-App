@@ -1,0 +1,18 @@
+[package]
+name = "mlkb-policy"
+description = "Admission control and the scarce-principal machinery."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mlkb-crypto = { workspace = true }
+mlkb-wire = { workspace = true }
+mlkb-bounded = { workspace = true }
+mlkb-codec = { workspace = true }

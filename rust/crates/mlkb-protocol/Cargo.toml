@@ -1,0 +1,52 @@
+[package]
+name = "mlkb-protocol"
+description = "Every ML-KEM-Braid state transition and key schedule. sans-io: no clock, no RNG, no globals."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mlkb-wire = { workspace = true }
+mlkb-crypto = { workspace = true }
+mlkb-codec = { workspace = true }
+mlkb-secrets = { workspace = true }
+mlkb-bounded = { workspace = true }
+# Naming only, and one type: `MessageKey::open` returns `Zeroizing<Vec<u8>>`
+# (spec parent §8.2), and `Event::MessageReceived` has to be able to *hold*
+# that value. Copying the plaintext into a plain `Vec<u8>` to avoid the edge
+# would delete the wipe-on-drop this crate is handed, which is the wrong
+# trade. No zeroization is *implemented* here — `mlkb-secrets` remains the
+# crate that owns secret containers (M1 §G.1); this edge only lets one of its
+# return types be spelled.
+zeroize = { workspace = true }
+
+[dev-dependencies]
+# Tests only, and only to *name* the RNG traits. This crate takes its
+# randomness through the `Entropy` trait precisely so that it depends on no
+# RNG (parent §11 gate 6, M1 §G.2); the test `Entropy` implementation has to
+# spell `CryptoRng` to drive `mlkb-crypto`'s randomised constructors. It is a
+# deterministic RNG living behind `#[cfg(test)]`, which M1 §I.3 requires never
+# be reachable from a production constructor.
+rand_core = { workspace = true }
+
+# `tests/key_schedule_kat.rs` ONLY, and the reason it needs them is the point
+# of that file: it recomputes the M1 §C.1 `ikm` and the resulting `SK` from the
+# raw primitives, with no help from `mlkb-crypto`'s key schedule. Deriving the
+# expected answer with the same code that produced the actual answer would make
+# the test circular — a systematically wrong but self-consistent schedule (the
+# `DH1`/`DH2` swap an external review demonstrated) passes every differential
+# test in this crate. These four are the second implementation.
+#
+# Every version is the workspace's; no version is named here. Nothing outside
+# `tests/` may use them: the library's randomness boundary is `Entropy`
+# (M1 §G.2) and its cryptography is `mlkb-crypto`'s (parent §7).
+x25519-dalek = { workspace = true }
+ml-kem = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }

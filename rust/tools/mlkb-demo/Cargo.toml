@@ -1,0 +1,33 @@
+# A local verification harness: a browser UI that drives the real protocol.
+#
+# It lives in `tools/` and NOT in `crates/` on purpose. It must never become a
+# dependency of a shipping crate, and `deny.toml` plus the parent §7 crate DAG
+# govern `crates/` only. Nothing here is a shipping component; see README.md.
+#
+# NO new third-party dependency. Everything below is already pinned in the
+# workspace table. There is no HTTP crate and no serialization crate in this
+# workspace (`serde` is banned outright by `deny.toml`), so this binary carries
+# its own ~200-line blocking HTTP/1.1 server and its own JSON writer. Both are
+# demo-grade and say so in their own module docs.
+[package]
+name = "mlkb-demo"
+description = "Local browser harness that drives real ML-KEM-Braid sessions, including tamper cases"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mlkb-protocol = { workspace = true }
+mlkb-wire = { workspace = true }
+mlkb-crypto = { workspace = true }
+mlkb-secrets = { workspace = true }
+# The `Entropy` implementation in `src/entropy.rs` is the platform CSPRNG, and
+# naming `CryptoRng` is how `mlkb-crypto`'s randomised constructors are driven —
+# the same reason `mlkb-wire` and `mlkb-protocol` take it.
+rand_core = { workspace = true }
+getrandom = { workspace = true }

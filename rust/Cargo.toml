@@ -1,0 +1,114 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/mlkb-secrets",
+    "crates/mlkb-bounded",
+    "crates/mlkb-codec",
+    "crates/mlkb-crypto",
+    "crates/mlkb-wire",
+    "crates/mlkb-protocol",
+    "crates/mlkb-store",
+    "crates/mlkb-transport",
+    "crates/mlkb-policy",
+    "crates/mlkb-session",
+    "crates/mlkb",
+    "crates/mlkb-ffi",
+    "crates/mlkb-server",
+    "crates/mlkb-testkit",
+    "tools/xeddsa-crosscheck",
+    "tools/mlkb-demo",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/GeassedbyLelouch/Distributed-Messaging-App"
+authors = ["ML-KEM-Braid contributors"]
+
+# Every third-party version is pinned here. A crate that needs a dependency
+# takes it from `workspace = true`; no crate names a version of its own.
+[workspace.dependencies]
+# --- internal (the §7 crate graph) ---
+mlkb-secrets = { path = "crates/mlkb-secrets", version = "0.1.0" }
+mlkb-bounded = { path = "crates/mlkb-bounded", version = "0.1.0" }
+mlkb-codec = { path = "crates/mlkb-codec", version = "0.1.0" }
+mlkb-crypto = { path = "crates/mlkb-crypto", version = "0.1.0" }
+mlkb-wire = { path = "crates/mlkb-wire", version = "0.1.0" }
+mlkb-protocol = { path = "crates/mlkb-protocol", version = "0.1.0" }
+mlkb-store = { path = "crates/mlkb-store", version = "0.1.0" }
+mlkb-transport = { path = "crates/mlkb-transport", version = "0.1.0" }
+mlkb-policy = { path = "crates/mlkb-policy", version = "0.1.0" }
+mlkb-session = { path = "crates/mlkb-session", version = "0.1.0" }
+mlkb = { path = "crates/mlkb", version = "0.1.0" }
+mlkb-testkit = { path = "crates/mlkb-testkit", version = "0.1.0" }
+
+# --- cryptography (spec §5.3) ---
+ml-kem = { version = "0.3.2", default-features = false, features = ["alloc", "zeroize"] }
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "rand_core", "zeroize"] }
+# `static_secrets` is NOT a default feature; without it `StaticSecret` does not
+# exist and long-term identity keys are impossible (Phase 0, Q5).
+x25519-dalek = { version = "3.0.0", default-features = false, features = ["static_secrets", "zeroize", "precomputed-tables"] }
+curve25519-dalek = { version = "5.0.0", default-features = false, features = ["alloc", "zeroize", "precomputed-tables"] }
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
+hkdf = { version = "0.13.0", default-features = false }
+hmac = { version = "0.13.0", default-features = false }
+sha2 = { version = "0.11.0", default-features = false }
+subtle = { version = "2.6.1", default-features = false }
+zeroize = { version = "1.9.0", default-features = false, features = ["alloc", "derive"] }
+rand_core = { version = "0.10.1", default-features = false }
+getrandom = { version = "0.4", default-features = false, features = ["std"] }
+
+# --- encoding ---
+# NO serialization crate appears here. `ciborium` was evaluated during Phase 0
+# and REJECTED: it does not sort map keys, cannot be told to reject floats, and
+# its decoder accepts indefinite-length input — so it cannot produce or enforce
+# the RFC 8949 §4.2.1 profile the spec requires. `mlkb-codec` implements the
+# deterministic subset itself. See the M1 resolutions doc, §B.1.
+
+# --- std-side ---
+thiserror = "2"
+rusqlite = "0.40"
+hex = { version = "0.4", default-features = false }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+# §11 gate 7: the panic-free lints are DENY, not warn, and the gate tests them
+# against the code rather than merely declaring them. Crates that are allowed to
+# panic (testkit, server, tests) re-allow locally.
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+# Parent §11 gate 7, hoisted here so it has exactly ONE definition. The four
+# per-crate `#![deny(...)]` blocks had already drifted apart (security audit
+# 2026-08-02, LOW "lint-gate coverage"), which is the duplicated-definition
+# defect class this whole rewrite exists to prevent — applied to its own lints.
+# Crates re-allow these inside `#[cfg(test)]` only.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+exit = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+
+[profile.release]
+# §8.5: panic = "abort" in release, so mutex poisoning never occurs.
+panic = "abort"
+lto = "thin"
+codegen-units = 1
+overflow-checks = true
+
+[profile.bench]
+overflow-checks = true

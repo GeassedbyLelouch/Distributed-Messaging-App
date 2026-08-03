@@ -1,0 +1,75 @@
+# Spec §11 gate 6, PART (c) ONLY: the ban on any second serialization
+# implementation entering the dependency graph.
+#
+# What this file does NOT do, stated plainly because an earlier revision of this
+# header claimed otherwise (security audit 2026-08-02, MEDIUM "ineffective
+# control"): cargo-deny cannot express intra-workspace DAG rules, so it cannot
+# enforce "`mlkb-protocol` must not depend on std, a clock, an RNG, or
+# `mlkb-store`" or "`mlkb-transport` must not depend on any serialization
+# crate". Those are gate 6 parts (a) and (b) and they are enforced elsewhere:
+#   (a) `#![no_std]` in each subtree crate root, which makes std usage a
+#       compile error rather than a policy;
+#   (b) the `thumbv7em-none-eabi` cross-compile job in CI.
+# A control that advertises more than it performs is worse than no control.
+#
+# Note (verbatim from the spec, so nobody re-derives the wrong claim later):
+# `cargo check --target thumbv7em-none-eabi` proves no-`std`; it does NOT prove
+# absence of global mutable state — `static mut`, atomics and spin-locks all
+# compile. Do not claim otherwise.
+
+# `false` would narrow ban coverage to the default feature set, so a
+# feature-gated path into a banned crate would go unseen
+# (security audit 2026-08-02, LOW "scanner-coverage").
+[graph]
+all-features = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+# Serialization must exist in exactly one place: `mlkb-codec`. Anything else
+# reaching for a serializer is the duplicate-codec defect class the whole
+# rewrite exists to prevent (audit M8).
+[[bans.deny]]
+name = "serde_json"
+
+[[bans.deny]]
+name = "serde_cbor"
+
+[[bans.deny]]
+name = "rmp-serde"
+
+# `ciborium` was evaluated in Phase 0 and rejected outright: it cannot sort map
+# keys, cannot reject floats, and its decoder accepts indefinite-length input.
+# `mlkb-codec` implements the deterministic CBOR subset itself, so NO
+# serialization crate may enter the graph at all.
+[[bans.deny]]
+name = "ciborium"
+
+[[bans.deny]]
+name = "ciborium-ll"
+
+[[bans.deny]]
+name = "ciborium-io"
+
+[[bans.deny]]
+name = "serde"
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "Unicode-3.0",
+    "Zlib",
+    "GPL-3.0-or-later",
+]
+confidence-threshold = 0.9
+
+[advisories]
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

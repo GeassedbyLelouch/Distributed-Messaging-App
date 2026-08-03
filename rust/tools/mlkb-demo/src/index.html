@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ML-KEM-Braid — local verification harness</title>
+<style>
+/* Deliberately bare. The point of this page is that the numbers on it are
+   real, not that it is pretty. Monospace throughout so hex lines up. */
+:root {
+  --bg: #101214; --fg: #d8dee4; --dim: #7c8894; --rule: #29303a;
+  --ok: #6fcf7f; --bad: #f4736a; --warn: #e0b24c; --key: #7cc4f0;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 1.5rem; background: var(--bg); color: var(--fg);
+  font: 13px/1.55 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+main { max-width: 1100px; margin: 0 auto; }
+h1 { font-size: 1.15rem; margin: 0 0 .2rem; }
+h2 {
+  font-size: .95rem; margin: 2rem 0 .6rem; padding-bottom: .3rem;
+  border-bottom: 1px solid var(--rule); color: var(--key);
+}
+h3 { font-size: .85rem; margin: 1rem 0 .4rem; color: var(--dim); font-weight: normal; }
+p { margin: .4rem 0; }
+.dim { color: var(--dim); }
+.ok { color: var(--ok); }
+.bad { color: var(--bad); }
+.warn { color: var(--warn); }
+.banner {
+  border: 1px solid var(--warn); color: var(--warn);
+  padding: .5rem .7rem; margin: .8rem 0 0;
+}
+table { border-collapse: collapse; width: 100%; margin: .4rem 0; }
+th, td {
+  text-align: left; padding: .25rem .6rem .25rem 0;
+  border-bottom: 1px solid var(--rule); vertical-align: top;
+}
+th { color: var(--dim); font-weight: normal; white-space: nowrap; }
+td.num { text-align: right; padding-right: 1.2rem; }
+button {
+  font: inherit; background: #1b2027; color: var(--fg);
+  border: 1px solid var(--rule); padding: .2rem .5rem; margin: 0 .2rem .2rem 0;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--key); color: var(--key); }
+button:disabled { opacity: .4; cursor: not-allowed; }
+button.danger:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); }
+input[type=text] {
+  font: inherit; background: #1b2027; color: var(--fg);
+  border: 1px solid var(--rule); padding: .25rem .4rem; width: 22rem;
+}
+pre {
+  background: #0a0c0e; border: 1px solid var(--rule); padding: .5rem;
+  overflow-x: auto; margin: .3rem 0; white-space: pre-wrap; word-break: break-all;
+}
+pre.tall { max-height: 16rem; overflow-y: auto; }
+.hex { color: var(--dim); }
+.frame { border: 1px solid var(--rule); padding: .5rem .7rem; margin: .5rem 0; }
+.frame .hdr { margin-bottom: .3rem; }
+.cols { display: flex; gap: 1.5rem; flex-wrap: wrap; }
+.cols > section { flex: 1 1 22rem; min-width: 0; }
+.log-line { padding: .1rem 0; border-bottom: 1px solid #1a1f26; }
+.log-line .kind { color: var(--dim); display: inline-block; width: 5rem; }
+footer { margin: 3rem 0 1rem; color: var(--dim); border-top: 1px solid var(--rule); padding-top: .6rem; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>ML-KEM-Braid — local verification harness</h1>
+<p class="dim">
+  Two real sessions in one process. Every key, signature, encapsulation, nonce,
+  frame and error below was produced live by <code>mlkb-crypto</code>,
+  <code>mlkb-wire</code> and <code>mlkb-protocol</code>. Nothing on this page is
+  mocked or canned.
+</p>
+<p class="banner">
+  Local verification tool. NOT a shipping component. Bound to 127.0.0.1 only.
+  No persistence, no authentication, no transport security.
+</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2>1 · Identities</h2>
+<table>
+  <tr><th>Alice — IdentityId</th><td><span id="alice-id" class="hex"></span></td></tr>
+  <tr><th>Bob — IdentityId</th><td><span id="bob-id" class="hex"></span></td></tr>
+</table>
+<p class="dim">
+  <code>IdentityId = SHA-256(ik_x25519 ‖ SHA-256(ik_mldsa))</code> — a hybrid
+  identity (X25519 + ML-DSA-65), parent §3.5. The 1952-byte ML-DSA key is
+  deliberately not on the wire, which is what makes this computable from
+  <code>InitialMessageV2</code> alone.
+</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2>2 · Bob's prekey bundle, fetched and verified by Alice</h2>
+<p id="bundle-verdict"></p>
+<table>
+  <tr><th>PrekeyBundleV2, encoded</th><td class="num" id="bundle-bytes"></td><td class="dim">deterministic CBOR, M1 §B</td></tr>
+  <tr><th>ML-DSA-65 verifying key</th><td class="num" id="mldsa-bytes"></td><td class="dim">the honest PQ cost of a signature identity</td></tr>
+  <tr><th>ML-KEM-1024 encapsulation key</th><td class="num" id="kem-ek-bytes"></td><td class="dim">the PQ prekey, M1 §C.3</td></tr>
+  <tr><th>one hybrid signature</th><td class="num" id="sig-bytes"></td><td class="dim">XEd25519 (64) + ML-DSA-65 (3309) + framing, M1 §E.1</td></tr>
+</table>
+<p class="dim">
+  Both prekey signatures are verified before any key in the bundle is used
+  (parent §4.3), each under its own signature context (M1 §E.2) — which is what
+  stops a signed X25519 prekey being lifted into the PQ-prekey slot. The
+  <code>EnrolmentProof</code> in the bundle is <em>not</em> verified here: its
+  issuer keys are a pinned set and the check belongs to <code>mlkb-policy</code>
+  (M1 §F). Its signature in this demo is a structurally valid placeholder, and
+  is never presented as valid.
+</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2>3 · PQXDH — did both sides derive the same SK?</h2>
+<table>
+  <tr><th>Alice's session_id</th><td><span id="alice-sid" class="hex"></span></td></tr>
+  <tr><th>Bob's session_id</th><td><span id="bob-sid" class="hex"></span></td></tr>
+  <tr><th>equal?</th><td id="sid-verdict"></td></tr>
+</table>
+<p class="dim">
+  <code>session_id = HKDF-Expand(SK, "MLKEMBraid/sid/v2", 32)</code>. Each side
+  computed it independently from its own <code>SK</code>; <code>SK</code> itself
+  never leaves <code>RootKey</code> and there is no accessor for it, so this
+  equality is the <em>only</em> observation of root-key agreement either end can
+  make. <code>ikm = F ‖ DH1 ‖ DH2 ‖ DH3 ‖ DH4 ‖ KEM_SS</code> (M1 §C.1) — four
+  X25519 legs and one real ML-KEM-1024 encapsulation. No root key exists in this
+  codebase without the PQ leg: <code>derive_sk</code> consumes a
+  <code>KemSharedSecret</code> by value and the only source of one is a real
+  ML-KEM operation (parent §4.1).
+</p>
+<h3>The sealed <code>0x01</code> InitialMessageV2 frame (<span id="initial-bytes"></span> bytes on the wire)</h3>
+<pre id="initial-wire" class="hex tall"></pre>
+
+<!-- ------------------------------------------------------------------ -->
+<h2>4 · Live chat</h2>
+<p class="dim">
+  Sending seals a frame and leaves it <strong>in flight</strong>. Nothing is
+  delivered until you deliver it — which is how you reorder messages, and how
+  you deliver a tampered copy without losing the original.
+</p>
+<p class="warn" id="speaks-first">
+  Alice must speak first. <code>InitialMessageV2</code> (M1 §C.3) carries no
+  ML-KEM encapsulation key for the initiator, so Bob has nothing to encapsulate
+  to until he has received one application message. Try sending as Bob to see
+  the real error.
+</p>
+<p>
+  <label>as
+    <select id="from">
+      <option value="alice">Alice</option>
+      <option value="bob">Bob</option>
+    </select>
+  </label>
+  <input type="text" id="text" placeholder="type a message" value="hello from the other side">
+  <button id="send">seal frame</button>
+</p>
+<p id="send-error" class="bad"></p>
+
+<div class="cols">
+<section>
+  <h3>In flight</h3>
+  <div id="inflight"></div>
+</section>
+<section>
+  <h3>Delivered (replayable)</h3>
+  <div id="delivered"></div>
+</section>
+</div>
+
+<!-- ------------------------------------------------------------------ -->
+<h2>5 · Session state</h2>
+<table>
+  <tr><th></th><th>Alice</th><th>Bob</th></tr>
+  <tr><th>send_epoch</th><td id="a-se"></td><td id="b-se"></td></tr>
+  <tr><th>recv_generation</th><td id="a-rg"></td><td id="b-rg"></td></tr>
+  <tr><th>skipped keys held</th><td id="a-sk"></td><td id="b-sk"></td></tr>
+  <tr><th>ratchet due on next send</th><td id="a-rd"></td><td id="b-rd"></td></tr>
+  <tr><th>state fingerprint</th><td><span id="a-fp" class="hex"></span></td><td><span id="b-fp" class="hex"></span></td></tr>
+  <tr><th>HandshakeGuard</th><td colspan="2" id="guard"></td></tr>
+</table>
+<p class="dim">
+  The fingerprint is <code>SHA-256</code> over the four counters above plus the
+  <code>session_id</code>. It covers exactly that, and no more: <code>Session</code>
+  exposes no reader for the root key, either chain key, the frame keys or the
+  ratchet keypairs, and this tool is not going to add one. Those four counters
+  are nevertheless precisely the fields a frame that got past authentication
+  would move. To check the <em>secret</em> state as well, use the liveness probe
+  — a genuine message that still decrypts after a rejection proves the receiving
+  chain key did not move either.
+</p>
+<p>
+  <button data-probe="alice">liveness probe: Alice → Bob</button>
+  <button data-probe="bob">liveness probe: Bob → Alice</button>
+</p>
+<div id="probe-result"></div>
+
+<!-- ------------------------------------------------------------------ -->
+<h2>6 · Tamper controls</h2>
+<p class="dim">
+  The frame MAC's preimage is <code>label ‖ wire[0 .. 15+payload_len]</code>
+  (M1 §A.1) — the whole frame except the tag. So <strong>every</strong>
+  byte-level mutation, wherever it lands, is refused before the state machine
+  sees it, and all four byte-level buttons below give the same answer for the
+  same reason. That sameness is the point: audit M1's defect was a MAC that did
+  <em>not</em> cover the framing. Use the buttons on any in-flight frame above.
+</p>
+<p class="dim">
+  The two attacks that do <em>not</em> modify bytes get past the MAC and have to
+  be caught by the state machine instead: <strong>replay</strong> (below, and on
+  any delivered frame) and <strong>reordering</strong> (deliver in-flight frames
+  out of order).
+</p>
+
+<h3>Reserved <code>msg_type</code> — the registry, asked directly</h3>
+<p class="dim">
+  Flipping <code>msg_type</code> on the wire is caught by the MAC, so M1 §A.1
+  rule 6 — "validate <code>msg_type</code> only <em>after</em> the MAC verifies"
+  — is unreachable from outside without the frame key. That is the property, not
+  a gap. This asks <code>MsgType::from_u8</code> directly so you can see what the
+  closed registry (M1 §A.2) does with a reserved byte.
+</p>
+<p>
+  <button data-registry="1">0x01 INITIAL</button>
+  <button data-registry="2">0x02 MESSAGE</button>
+  <button data-registry="3">0x03 ACK</button>
+  <button data-registry="0" class="danger">0x00 reserved</button>
+  <button data-registry="7" class="danger">0x07 reserved</button>
+  <button data-registry="255" class="danger">0xFF reserved</button>
+</p>
+<div id="registry-result"></div>
+
+<h3>Replay the handshake</h3>
+<p class="dim">
+  Re-feeds the captured <code>0x01</code> frame to <code>respond</code>. Two
+  things happen and both are shown: <code>respond</code> accepts it and builds a
+  second working session with the same <code>session_id</code> — it has no
+  replay defence of its own, by design — and <code>HandshakeGuard::admit</code>
+  then refuses it. The guard is the control that closes the hole, and calling it
+  is a caller obligation that no type enforces (parent §6.3).
+</p>
+<p><button id="replay-handshake" class="danger">replay the captured handshake</button></p>
+<div id="hs-result"></div>
+
+<h3>Last result</h3>
+<div id="tamper-result"><p class="dim">Deliver or tamper with a frame to see a before/after here.</p></div>
+
+<!-- ------------------------------------------------------------------ -->
+<h2>7 · Gates</h2>
+<p class="dim">
+  Runs <code>cargo test --workspace</code> and the two KAT suites for real and
+  reports what cargo printed. A cold run takes minutes; the button stays
+  disabled until it finishes.
+</p>
+<p><button id="gates">run the gates</button> <span id="gates-status" class="dim"></span></p>
+<div id="gates-result"></div>
+
+<!-- ------------------------------------------------------------------ -->
+<h2>8 · Transcript</h2>
+<p><button id="reset" class="danger">reset: new identities, new handshake</button></p>
+<div id="log"></div>
+
+<footer>
+  mlkb-demo · local verification harness · not a shipping component ·
+  spec: <code>docs/specs/2026-07-31-rust-rewrite-spec.md</code> +
+  <code>docs/specs/2026-08-01-m1-normative-resolutions.md</code>
+</footer>
+
+</main>
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+
+/* Everything user-supplied goes through here. The server escapes JSON, but a
+   demo that pasted protocol bytes into innerHTML would be setting a bad
+   example in a security tool. */
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+}[c]));
+
+async function post(path, fields) {
+  const body = new URLSearchParams(fields || {}).toString();
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body
+  });
+  return res.json();
+}
+
+async function get(path) {
+  const res = await fetch(path);
+  return res.json();
+}
+
+/* ---------------------------------------------------------------- render */
+
+function renderHandshake(h) {
+  $("alice-id").textContent = h.alice_id;
+  $("bob-id").textContent = h.bob_id;
+
+  $("bundle-verdict").innerHTML = h.bundle_verified
+    ? '<span class="ok">verify_bundle() ACCEPTED — both hybrid signatures verified, each under its own context</span>'
+    : '<span class="bad">verify_bundle() REJECTED</span>';
+
+  $("bundle-bytes").textContent = h.bundle_bytes.toLocaleString();
+  $("mldsa-bytes").textContent = h.mldsa_vk_bytes.toLocaleString();
+  $("kem-ek-bytes").textContent = h.kem_ek_bytes.toLocaleString();
+  $("sig-bytes").textContent = h.hybrid_sig_bytes.toLocaleString();
+
+  $("alice-sid").textContent = h.alice_sid;
+  $("bob-sid").textContent = h.bob_sid;
+  $("sid-verdict").innerHTML = h.sid_match
+    ? '<span class="ok">YES — both sides independently derived the same SK</span>'
+    : '<span class="bad">NO — the two sides did not agree</span>';
+
+  $("initial-bytes").textContent = h.initial_frame_bytes.toLocaleString();
+  $("initial-wire").textContent = h.initial_wire;
+}
+
+function fpRow(f) {
+  return `send_epoch ${f.send_epoch} · recv_generation ${f.recv_generation} · ` +
+         `skipped ${f.skipped_keys} · ratchet_due ${f.ratchet_due}<br>` +
+         `<span class="hex">${esc(f.digest)}</span>`;
+}
+
+function renderState(s) {
+  renderHandshake(s.handshake);
+
+  $("a-se").textContent = s.alice.send_epoch;
+  $("b-se").textContent = s.bob.send_epoch;
+  $("a-rg").textContent = s.alice.recv_generation;
+  $("b-rg").textContent = s.bob.recv_generation;
+  $("a-sk").textContent = s.alice.skipped_keys;
+  $("b-sk").textContent = s.bob.skipped_keys;
+  $("a-rd").textContent = s.alice.ratchet_due;
+  $("b-rd").textContent = s.bob.ratchet_due;
+  $("a-fp").textContent = s.alice.digest;
+  $("b-fp").textContent = s.bob.digest;
+  $("guard").textContent =
+    `${s.guard.peers} peer floor(s), ${s.guard.sessions} live session_id(s)`;
+
+  $("speaks-first").style.display = s.bob.send_epoch > 0 ? "none" : "";
+
+  renderInflight(s.inflight);
+  renderDelivered(s.delivered);
+  renderLog(s.log);
+}
+
+function renderInflight(frames) {
+  const el = $("inflight");
+  if (!frames.length) {
+    el.innerHTML = '<p class="dim">nothing in flight</p>';
+    return;
+  }
+  el.innerHTML = frames.map((f) => `
+    <div class="frame">
+      <div class="hdr">
+        <strong>#${f.id}</strong> ${esc(f.from)} → ${esc(f.to)} ·
+        epoch ${f.epoch} · n ${f.has_n ? f.n : "-"} ·
+        ${f.bytes.toLocaleString()} bytes${f.opens_chain ? ' · <span class="warn">opens a new chain (carries "ek" + "kc")</span>' : ""}
+      </div>
+      <div class="dim">sender typed: ${esc(f.plaintext)}</div>
+      <pre class="hex">${esc(f.wire.slice(0, 160))}${f.wire.length > 160 ? "…" : ""}</pre>
+      <button data-deliver="${f.id}" data-tamper="none">deliver</button>
+      <button data-deliver="${f.id}" data-tamper="ct" class="danger">flip ciphertext bit</button>
+      <button data-deliver="${f.id}" data-tamper="mac" class="danger">flip MAC bit</button>
+      <button data-deliver="${f.id}" data-tamper="type" class="danger">reserved msg_type</button>
+      <button data-deliver="${f.id}" data-tamper="epoch" class="danger">flip epoch bit</button>
+      <button data-full="${f.id}">full hex</button>
+      <pre class="hex tall" id="full-${f.id}" style="display:none">${esc(f.wire)}</pre>
+    </div>`).join("");
+}
+
+function renderDelivered(frames) {
+  const el = $("delivered");
+  if (!frames.length) {
+    el.innerHTML = '<p class="dim">nothing delivered yet</p>';
+    return;
+  }
+  el.innerHTML = frames.map((f) => `
+    <div class="frame">
+      <div class="hdr"><strong>#${f.id}</strong> ${esc(f.from)} → ${esc(f.to)} ·
+        ${f.bytes.toLocaleString()} bytes</div>
+      <div class="dim">${esc(f.plaintext)}</div>
+      <button data-replay="${f.id}" class="danger">replay this frame</button>
+    </div>`).join("");
+}
+
+function renderLog(lines) {
+  $("log").innerHTML = lines.slice().reverse().map((l) => `
+    <div class="log-line">
+      <span class="kind">${esc(l.kind)}</span>
+      <span class="${l.rejected ? "bad" : ""}">${esc(l.text)}</span>
+    </div>`).join("");
+}
+
+function outcomeHtml(o) {
+  if (o.error) {
+    return `<p class="bad">REFUSED at <code>${esc(o.stage)}</code> — ` +
+           `<code>ProtocolError::${esc(o.error)}</code> ("${esc(o.message)}")</p>`;
+  }
+  let html = `<p class="ok">ACCEPTED at <code>${esc(o.stage)}</code></p>`;
+  if (o.events && o.events.length) {
+    html += `<p class="dim">events: ${o.events.map(esc).join(", ")}</p>`;
+  }
+  if (o.plaintext) {
+    html += `<p>receiver decrypted: <strong>${esc(o.plaintext)}</strong></p>`;
+  }
+  return html;
+}
+
+function fingerprintTable(before, after, unchanged) {
+  return `
+    <table>
+      <tr><th></th><th>before</th><th>after</th></tr>
+      <tr><th>Alice</th><td>${fpRow(before.alice)}</td><td>${fpRow(after.alice)}</td></tr>
+      <tr><th>Bob</th><td>${fpRow(before.bob)}</td><td>${fpRow(after.bob)}</td></tr>
+    </table>
+    <p class="${unchanged ? "ok" : "warn"}">
+      ${unchanged
+        ? "Observable session state is UNCHANGED on both sides (parent §8.1: authenticate, then mutate)."
+        : "Session state moved — expected for an accepted frame, and a finding for a rejected one."}
+    </p>`;
+}
+
+/* --------------------------------------------------------------- actions */
+
+async function refresh() {
+  renderState(await get("/api/state"));
+}
+
+async function doSend() {
+  $("send-error").textContent = "";
+  const res = await post("/api/send", {
+    from: $("from").value,
+    text: $("text").value
+  });
+  if (res.error) {
+    $("send-error").textContent =
+      `Session::send refused: ProtocolError::${res.error} ("${res.message}")`;
+    if (res.state) renderState(res.state);
+    return;
+  }
+  renderState(res);
+}
+
+async function doDeliver(id, tamper) {
+  showResult(await post("/api/deliver", { id, tamper }));
+}
+
+async function doReplay(id) {
+  showResult(await post("/api/replay", { id }));
+}
+
+function showResult(res) {
+  if (res.error && !res.outcome) {
+    $("tamper-result").innerHTML =
+      `<p class="bad">${esc(res.error)}: ${esc(res.message)}</p>`;
+    return;
+  }
+  $("tamper-result").innerHTML =
+    `<p class="dim">what was done: ${esc(res.tamper)}</p>` +
+    outcomeHtml(res.outcome) +
+    fingerprintTable(res.before, res.after, res.state_unchanged);
+  renderState(res.state);
+  document.getElementById("tamper-result").scrollIntoView({ block: "nearest" });
+}
+
+async function doProbe(from) {
+  const res = await post("/api/probe", { from });
+  if (res.error && !res.outcome) {
+    $("probe-result").innerHTML =
+      `<p class="bad">probe could not be sent: ProtocolError::${esc(res.error)} ("${esc(res.message)}")</p>`;
+    if (res.state) renderState(res.state);
+    return;
+  }
+  $("probe-result").innerHTML =
+    `<p class="dim">a fresh genuine message, sealed and delivered immediately:</p>` +
+    outcomeHtml(res.outcome);
+  renderState(res.state);
+}
+
+async function doRegistry(byte) {
+  const r = await post("/api/registry", { byte });
+  $("registry-result").innerHTML = r.accepted
+    ? `<p class="ok">MsgType::from_u8(${r.byte}) → <code>${esc(r.result)}</code></p>`
+    : `<p class="bad">MsgType::from_u8(${r.byte}) → <code>ProtocolError::${esc(r.result)}</code> ("${esc(r.message)}")</p>`;
+}
+
+async function doReplayHandshake() {
+  const r = await post("/api/replay_handshake", {});
+  if (r.error && !r.state) {
+    $("hs-result").innerHTML = `<p class="bad">${esc(r.error)}: ${esc(r.message)}</p>`;
+    return;
+  }
+  $("hs-result").innerHTML =
+    `<p class="warn">respond() accepted the replayed handshake and built a second session` +
+    ` (same session_id: ${r.same_session_id}). It has no replay defence of its own, by design.</p>` +
+    `<p class="ok">HandshakeGuard::admit refused it: <code>ProtocolError::${esc(r.guard_error)}</code></p>`;
+  renderState(r.state);
+}
+
+async function doGates() {
+  const btn = $("gates");
+  btn.disabled = true;
+  $("gates-status").textContent = "running cargo test — this takes a while…";
+  try {
+    const r = await post("/api/gates", {});
+    const row = (label, g) => `
+      <h3>${esc(label)} — <code>${esc(g.command)}</code></h3>
+      <p class="${g.ok ? "ok" : "bad"}">
+        ${g.ok ? "PASS" : "FAIL"} · ${g.passed} passed · ${g.failed} failed · ${g.ignored} ignored
+      </p>
+      <pre class="tall">${esc(g.tail)}</pre>`;
+    $("gates-result").innerHTML = row("workspace", r.workspace) + row("KATs", r.kat);
+    $("gates-status").textContent = "";
+  } catch (e) {
+    $("gates-status").textContent = "the run failed: " + e;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ----------------------------------------------------------------- wire */
+
+$("send").addEventListener("click", doSend);
+$("text").addEventListener("keydown", (e) => { if (e.key === "Enter") doSend(); });
+$("reset").addEventListener("click", async () => {
+  renderState(await post("/api/reset", {}));
+  $("tamper-result").innerHTML = '<p class="dim">Deliver or tamper with a frame to see a before/after here.</p>';
+  $("probe-result").innerHTML = "";
+  $("hs-result").innerHTML = "";
+});
+$("gates").addEventListener("click", doGates);
+$("replay-handshake").addEventListener("click", doReplayHandshake);
+
+document.addEventListener("click", (e) => {
+  const t = e.target;
+  if (!(t instanceof HTMLElement)) return;
+  if (t.dataset.deliver) doDeliver(t.dataset.deliver, t.dataset.tamper);
+  else if (t.dataset.replay) doReplay(t.dataset.replay);
+  else if (t.dataset.probe) doProbe(t.dataset.probe);
+  else if (t.dataset.registry) doRegistry(t.dataset.registry);
+  else if (t.dataset.full) {
+    const pre = $("full-" + t.dataset.full);
+    if (pre) pre.style.display = pre.style.display === "none" ? "" : "none";
+  }
+});
+
+refresh();
+</script>
+</body>
+</html>

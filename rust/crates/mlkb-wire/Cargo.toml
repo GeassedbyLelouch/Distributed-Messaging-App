@@ -1,0 +1,44 @@
+[package]
+name = "mlkb-wire"
+description = "Every ML-KEM-Braid wire type and its exact-length parser."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mlkb-codec = { workspace = true }
+mlkb-secrets = { workspace = true }
+# Spec M1 §A.1 rule 5 and parent §3.5. This edge is *required* by two rules
+# this crate owns and cannot be moved elsewhere:
+#
+#   - `Frame::decode` must verify the frame MAC before it validates `msg_type`
+#     (M1 §A.1 rules 5 and 6). The algorithm is `mlkb-crypto`'s — `FrameKey`
+#     has no public constructor, and `FrameKey::mac`'s own documentation says
+#     "the preimage ... is `mlkb-wire`'s to build; this crate owns only the
+#     algorithm". Handing the caller an unverified frame instead would let it
+#     dispatch on an unauthenticated type byte, which parent §8.1 forbids.
+#   - `IdentityId` (parent §3.5) is a SHA-256 over wire bytes, and
+#     `mlkb-crypto`'s `SkInfo` documentation states that "`mlkb-wire` owns
+#     their computation".
+#
+# The edge is acyclic: `mlkb-crypto` depends on `mlkb-secrets` and
+# `mlkb-codec` only. It widens parent §7's ASCII crate graph in the same way,
+# and for the same kind of reason, as the `mlkb-crypto` → `mlkb-codec` edge
+# that graph also omits (see that crate's manifest).
+mlkb-crypto = { workspace = true }
+
+[dev-dependencies]
+# Tests only, and only to *name* the RNG traits: a `FrameKey` is reachable
+# solely through `derive_sk`, which consumes a real `KemSharedSecret`, which is
+# mintable only by an actual ML-KEM encapsulation — so the fixtures need an
+# RNG. They supply a deterministic one of their own rather than the system
+# CSPRNG, so that a failing key reproduces; M1 §I.3 requires that such an RNG
+# never be reachable from a production constructor, and this one lives in a
+# `#[cfg(test)]` module.
+rand_core = { workspace = true }

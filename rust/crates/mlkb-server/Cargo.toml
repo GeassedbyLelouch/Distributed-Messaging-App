@@ -1,0 +1,18 @@
+[package]
+name = "mlkb-server"
+description = "Directory and mailbox server. NOT part of the mobile build."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mlkb-wire = { workspace = true }
+mlkb-policy = { workspace = true }
+mlkb-codec = { workspace = true }
+thiserror = { workspace = true }

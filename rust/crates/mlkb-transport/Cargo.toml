@@ -1,0 +1,16 @@
+[package]
+name = "mlkb-transport"
+description = "Byte transport for ML-KEM-Braid. Must not depend on any serialization crate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mlkb-wire = { workspace = true }
+thiserror = { workspace = true }

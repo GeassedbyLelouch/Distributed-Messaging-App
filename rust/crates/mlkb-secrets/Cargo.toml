@@ -1,0 +1,24 @@
+[package]
+name = "mlkb-secrets"
+description = "Secret byte containers, the injected AEAD nonce, and the protocol error type (M1 §G.1)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+zeroize = { workspace = true, features = ["alloc"] }
+subtle = { workspace = true }
+# Spec M1 §G.2: `Nonce192::random` is the one mint point for a fresh nonce, so
+# this crate — not `mlkb-protocol` (parent §11 gate 6) — names the RNG trait.
+rand_core = { workspace = true }
+
+[dev-dependencies]
+# Tests only: the real system CSPRNG, to check that `Nonce192::random` does not
+# repeat. The library itself stays no_std and RNG-source agnostic.
+getrandom = { workspace = true, features = ["sys_rng"] }

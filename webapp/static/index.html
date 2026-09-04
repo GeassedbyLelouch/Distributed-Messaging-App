@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BraidLink</title>
+    <link rel="stylesheet" href="/ui/styles.css" />
+  </head>
+  <body>
+    <!-- ===================== Connect screen ===================== -->
+    <main id="connect-screen" class="connect-screen">
+      <div class="connect-card">
+        <div class="connect-mark" aria-hidden="true">
+          <span class="thread thread-a"></span>
+          <span class="thread thread-b"></span>
+        </div>
+        <h1>BraidLink</h1>
+        <p class="connect-sub">
+          Connect this browser to a device. Keys are generated and kept in the
+          local bridge process — this page never sees them.
+        </p>
+
+        <form id="connect-form" class="connect-form">
+          <label for="server-url">Server address</label>
+          <input id="server-url" type="text" value="http://localhost:8000" autocomplete="off" required />
+
+          <label for="username">Username</label>
+          <input id="username" type="text" placeholder="alice" autocomplete="username" required />
+
+          <button type="submit" id="connect-button">Connect</button>
+        </form>
+
+        <p class="connect-status" id="connect-status" role="status" aria-live="polite"></p>
+      </div>
+    </main>
+
+    <!-- ===================== App shell ===================== -->
+    <div id="app-shell" class="app-shell hidden">
+      <nav class="rail" aria-label="BraidLink navigation">
+        <div class="rail-identity">
+          <span class="rail-dot" id="conn-dot" title="Connection"></span>
+          <div>
+            <div class="rail-username" id="rail-username">—</div>
+            <div class="rail-device" id="rail-device">device —</div>
+          </div>
+        </div>
+
+        <div class="rail-nav">
+          <button class="rail-item is-active" data-view="chats" type="button">
+            Chats
+          </button>
+          <button class="rail-item" data-view="contacts" type="button">
+            Contacts
+          </button>
+          <button class="rail-item" data-view="requests" type="button">
+            Requests <span class="rail-badge" id="requests-badge" hidden>0</span>
+          </button>
+        </div>
+
+        <button class="rail-item rail-signout" id="disconnect-button" type="button">
+          Disconnect
+        </button>
+      </nav>
+
+      <!-- ---------- Chats view ---------- -->
+      <section class="view" id="view-chats" data-view-panel="chats">
+        <aside class="thread-list" aria-label="Conversations">
+          <div class="view-heading">
+            <h2>Chats</h2>
+          </div>
+          <div id="chat-contact-list" class="thread-list-items"></div>
+        </aside>
+
+        <section class="thread" aria-label="Conversation">
+          <header class="thread-header">
+            <div>
+              <h3 id="thread-peer-name">Select a contact</h3>
+              <p class="thread-status" id="thread-status">&nbsp;</p>
+            </div>
+          </header>
+          <div class="thread-body" id="thread-body" role="log" aria-live="polite"></div>
+          <form class="composer" id="composer">
+            <input
+              id="composer-input"
+              type="text"
+              placeholder="Select a contact to start messaging"
+              autocomplete="off"
+              disabled
+            />
+            <button type="submit" id="composer-send" disabled>Send</button>
+          </form>
+        </section>
+      </section>
+
+      <!-- ---------- Contacts view ---------- -->
+      <section class="view hidden" id="view-contacts" data-view-panel="contacts">
+        <div class="panel">
+          <div class="view-heading">
+            <h2>Contacts</h2>
+            <button class="ghost-button" id="refresh-contacts" type="button">Refresh</button>
+          </div>
+
+          <form class="lookup-form" id="lookup-form">
+            <input id="lookup-username" type="text" placeholder="Find a username" autocomplete="off" required />
+            <button type="submit">Find</button>
+          </form>
+          <div class="lookup-result" id="lookup-result"></div>
+
+          <h3 class="panel-subhead">Your contacts</h3>
+          <div id="contact-list" class="contact-list"></div>
+        </div>
+      </section>
+
+      <!-- ---------- Requests view ---------- -->
+      <section class="view hidden" id="view-requests" data-view-panel="requests">
+        <div class="panel">
+          <div class="view-heading">
+            <h2>Requests</h2>
+            <button class="ghost-button" id="refresh-requests" type="button">Refresh</button>
+          </div>
+
+          <h3 class="panel-subhead">Incoming</h3>
+          <div id="inbound-requests" class="request-list"></div>
+
+          <h3 class="panel-subhead">Sent</h3>
+          <div id="outbound-requests" class="request-list"></div>
+        </div>
+      </section>
+    </div>
+
+    <script src="/ui/app.js"></script>
+  </body>
+</html>
